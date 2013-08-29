@@ -1,0 +1,11 @@
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
+PROJECT(redis_vtbl)
+
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
+
+#INCLUDE_DIRECTORIES()
+ADD_LIBRARY(redis_vtbl SHARED redis_vtbl.c)
+TARGET_LINK_LIBRARIES(redis_vtbl hiredis)
+
+ADD_EXECUTABLE(driver driver.c)
+TARGET_LINK_LIBRARIES(driver sqlite3)
