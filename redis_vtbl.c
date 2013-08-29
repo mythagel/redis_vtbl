@@ -3,7 +3,9 @@ SQLITE_EXTENSION_INIT1
 
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
-
+#include <string.h>
+#include <errno.h>
+#include <ctype.h>
 /*
 
 NULL
@@ -408,6 +410,10 @@ any iteration needs to lookup in the set.
 /*    return SQLITE_OK;*/
 /*}*/
 
+static const size_t MAX_STRING_SIZE = 2048;
+static const int DEFAULT_REDIS_PORT = 6379;
+static const int DEFAULT_SENTINEL_PORT = 26379;
+
 /*-----------------------------------------------------------------------------
  * Simple transparent vector type
  *----------------------------------------------------------------------------*/
@@ -424,13 +430,13 @@ typedef struct vector_t {
     void** data;
 } vector_t;
 
-void vector_init(vector_t *vector) {
+static void vector_init(vector_t *vector) {
     vector->capacity = 0;
     vector->size = 0;
     vector->data = 0;
 }
 
-int vector_push(vector_t *vector, void* value) {
+static int vector_push(vector_t *vector, void* value) {
     if (vector->size == vector->capacity) {
         size_t capacity = vector->capacity ? vector->capacity*1.618 : 1;
         void* data = realloc(vector->data, sizeof(void*)*capacity);
@@ -442,7 +448,7 @@ int vector_push(vector_t *vector, void* value) {
     return VECTOR_OK;
 }
 
-void vector_free(vector_t *vector, void (*value_free)(void *value)) {
+static void vector_free(vector_t *vector, void (*value_free)(void *value)) {
     if(value_free) {
         size_t i;
         for(i = 0; i < vector->size; ++i)
@@ -470,10 +476,104 @@ void vector_free(vector_t *vector, void (*value_free)(void *value)) {
  *   return connected master context
  * return appropriate error code*/
 
-struct redis_vtbl_connection {
+enum
+{
+    CONNECTION_OK,
+    CONNECTION_BAD_FORMAT,
+    CONNECTION_ENOMEM
+};
+
+typedef struct redis_vtbl_connection {
     char *service;              /* sentinel service name; optional */
     vector_t addresses;             /* list of redis/sentinel addresses */
-};
+} redis_vtbl_connection;
+
+
+/* Validate address format:
+ * address | address:port */
+static int redis_vtbl_connection_parse_address(const char* address_spec, int default_port, char **address, int *port) {
+    char* pos;
+    
+    pos = strchr(address_spec, ':');
+    if(pos) {
+        int p;
+        char *end;
+        size_t addr_len;
+        
+        addr_len = pos - address_spec;
+        ++pos;
+        if(*pos == 0)
+            return CONNECTION_BAD_FORMAT;
+        
+        errno = 0;
+        p = strtol(pos, &end, 10);
+        if(errno || !port || *end)      /* out-of-range | zero | rubbish characters */
+            return CONNECTION_BAD_FORMAT;
+        
+        if(port) *port = p;
+        if(address) {
+            *address = strndup(address_spec, addr_len > MAX_STRING_SIZE ? MAX_STRING_SIZE : addr_len);
+            if(!*address)
+                return CONNECTION_ENOMEM;
+        }
+        return CONNECTION_OK;
+
+    } else {
+
+        if(port) *port = default_port;
+        if(address) {
+            *address = strndup(address_spec, MAX_STRING_SIZE);
+            if(!*address)
+                return CONNECTION_ENOMEM;
+        }
+        return CONNECTION_OK;
+    }
+}
+
+static int redis_vtbl_connection_check_address(const char* address_spec) {
+    return redis_vtbl_connection_parse_address(address_spec, 0, 0, 0);
+}
+
+/* Initialise a new connection object from the given configuration.
+ *
+ * address[:port]
+ * A connection to a single redis instance
+ *
+ * sentinel service-name address[:port][; address[:port]...]
+ * A connection to the redis sentinel service at the given addresses. */
+static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* config) {
+    size_t tok;
+    
+    while(config && isspace(*config))
+        ++config;
+
+    if(!config)
+        return CONNECTION_BAD_FORMAT;
+    
+    conn->service = 0;
+    
+    tok = strcspn(config, "\t\n\v\f\r ");
+    if(!strncmp(config, "sentinel", tok)) {
+        /* Validate format:
+         * sentinel service-name address[:port][; address[:port]...] */
+        pos = strpbrk(pos+8, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
+        
+    } else {
+        int res;
+        res = redis_vtbl_connection_check_address(config);
+        if(res != CONNECTION_OK)
+            return res;
+        
+        /* initialize new object */
+        char *address = strndup(config, MAX_STRING_SIZE);
+        if(!address)
+            return CONNECTION_ENOMEM;
+        
+        vector_init(&conn->addresses);
+        vector_push(&conn->addresses, address);
+    }
+    return CONNECTION_OK;
+}
 
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table.[rowid]      = hash of the row data.
