@@ -407,14 +407,6 @@ any iteration needs to lookup in the set.
 /*    return SQLITE_OK;*/
 /*}*/
 
-struct redis_vtbl_vtab {
-    sqlite3_vtab base;
-    redisContext *c;
-    char *key_base;
-    unsigned int columns;
-    char **column;
-};
-
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo);
@@ -431,6 +423,20 @@ static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_contex
 static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *pRowid);
 
 static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv);
+
+
+/*-----------------------------------------------------------------------------
+ * Redis backed Virtual table
+ *----------------------------------------------------------------------------*/
+
+struct redis_vtbl_vtab {
+    sqlite3_vtab base;
+    
+    redisContext *c;
+    char *key_base;
+    unsigned int columns;
+    char **column;
+};
 
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
     return SQLITE_ERROR;
@@ -450,6 +456,22 @@ static int redis_vtbl_disconnect(sqlite3_vtab *pVTab) {
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
     return SQLITE_ERROR;
 }
+
+
+/*-----------------------------------------------------------------------------
+ * Redis backed Virtual table cursor
+ *----------------------------------------------------------------------------*/
+
+struct redis_vtbl_cursor {
+    sqlite3_vtab_cursor base;
+    
+    unsigned int rows;
+    sqlite3_int64* row;
+    sqlite3_int64* current_row;
+    
+    unsigned int columns;
+    char **column;
+};
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor) {
     return SQLITE_ERROR;
@@ -473,9 +495,19 @@ static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *
     return SQLITE_ERROR;
 }
 
+
+/*-----------------------------------------------------------------------------
+ * Utility function to define indexes
+ *----------------------------------------------------------------------------*/
+
 static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 
 }
+
+
+/*-----------------------------------------------------------------------------
+ * sqlite3 extension machinery
+ *----------------------------------------------------------------------------*/
 
 static const sqlite3_module redis_vtbl_Module = {
     .iVersion     = 1,
