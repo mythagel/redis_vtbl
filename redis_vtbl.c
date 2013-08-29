@@ -2,6 +2,7 @@
 SQLITE_EXTENSION_INIT1
 
 #include <hiredis/hiredis.h>
+#include <stdlib.h>
 
 /*
 
@@ -19,8 +20,8 @@ column names are keys in the hash
 when creating a table, need
 argv[1] - database name
 argv[2] - table name
-argv[3] - address of redis e.g. "127.0.0.1:6379"
-argv[3] - key prefix
+argv[3] - address of redis e.g. "127.0.0.1:6379;192.168.1.1;192.168.1.2"
+argv[4] - key prefix
 
 
 base key in redis will be 
@@ -112,7 +113,7 @@ any iteration needs to lookup in the set.
 /*        }*/
 /*    }*/
 /*    */
-/*    
+/*    */
 /*    Retrieve row ids from redis.*/
 /*    Set row_id to first returned record.*/
 /*    retrieve the first record.*/
@@ -407,6 +408,85 @@ any iteration needs to lookup in the set.
 /*    return SQLITE_OK;*/
 /*}*/
 
+/*-----------------------------------------------------------------------------
+ * Simple transparent vector type
+ *----------------------------------------------------------------------------*/
+
+enum
+{
+    VECTOR_OK = 0,
+    VECTOR_ENOMEM
+};
+
+typedef struct vector_t {
+    size_t capacity;
+    size_t size;
+    void** data;
+} vector_t;
+
+void vector_init(vector_t *vector) {
+    vector->capacity = 0;
+    vector->size = 0;
+    vector->data = 0;
+}
+
+int vector_push(vector_t *vector, void* value) {
+    if (vector->size == vector->capacity) {
+        size_t capacity = vector->capacity ? vector->capacity*1.618 : 1;
+        void* data = realloc(vector->data, sizeof(void*)*capacity);
+        if(!data) return VECTOR_ENOMEM;
+        vector->capacity = capacity;
+        vector->data = data;
+    }
+    vector->data[vector->size++] = value;
+    return VECTOR_OK;
+}
+
+void vector_free(vector_t *vector, void (*value_free)(void *value)) {
+    if(value_free) {
+        size_t i;
+        for(i = 0; i < vector->size; ++i)
+            value_free(vector->data[i]);
+    }
+    free(vector->data);
+}
+
+/*
+ * Sentinel client algorithm
+ * track:
+ *   no sentinel reachable -> error seninel down
+ *   all null responses    -> master unknown
+ *
+ * for each sentinel address
+ *   redisConnectWithTimeout(ip, port, short tv);
+ *     fail -> continue
+ *   SENTINEL get-master-addr-by-name master-name
+ *     fail -> continue
+ *   master ip:port received
+ *   connect to master
+ *     fail -> continue
+ *   if sentinel not at head of list
+ *     swap head, current
+ *   return connected master context
+ * return appropriate error code*/
+
+struct redis_vtbl_connection {
+    char *service;              /* sentinel service name; optional */
+    vector_t addresses;             /* list of redis/sentinel addresses */
+};
+
+/* A redis backed sqlite3 virtual table implementation.
+ * prefix.db.table.[rowid]      = hash of the row data.
+ * prefix.db.table.rowid        = sequence from which rowids are generated.
+ * prefix.db.table.index.rowid  = master index (set) of rows in the table
+ * prefix.db.table.index.x      = additional set(rowid) index(s) for column x*/
+
+/* argv[1]    - database name
+ * argv[2]    - table name
+ * argv[3]    - address of redis e.g. "127.0.0.1:6379"
+ * argv[3]    - address(es) of sentinel "sentinel service-name 127.0.0.1:6379;192.168.1.1"
+ * argv[4]    - key prefix
+ * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo);
@@ -434,8 +514,7 @@ struct redis_vtbl_vtab {
     
     redisContext *c;
     char *key_base;
-    unsigned int columns;
-    char **column;
+    vector_t columns;
 };
 
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
@@ -469,8 +548,7 @@ struct redis_vtbl_cursor {
     sqlite3_int64* row;
     sqlite3_int64* current_row;
     
-    unsigned int columns;
-    char **column;
+    vector_t columns;
 };
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor) {
