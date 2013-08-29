@@ -12,7 +12,7 @@ static int callback(void *NotUsed, int argc, char **argv, char **azColName) {
     return 0;
 }
 
-void exec(sqlite3 *db, const char* sql) {
+int exec(sqlite3 *db, const char* sql) {
     int rc;
     char *zErrMsg = 0;
     
@@ -21,8 +21,10 @@ void exec(sqlite3 *db, const char* sql) {
     if( rc != SQLITE_OK ) {
         fprintf(stderr, "-ERR %s\n", zErrMsg);
         sqlite3_free(zErrMsg);
+        return 1;
     } else {
         printf("+OK\n");
+        return 0;
     }
 }
 
@@ -36,17 +38,17 @@ int main() {
     rc = sqlite3_open("test.db", &db);
     if( rc ) {
         fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
-        exit(0);
+        exit(1);
     } else {
         fprintf(stdout, "Opened database successfully\n");
     }
 
     sqlite3_enable_load_extension(db, 1);
 
-    rc = sqlite3_load_extension(db, "./libredis_vtbl.so", 0, &zErrMsg);
+    rc = sqlite3_load_extension(db, "../src/libredis_vtbl.so", 0, &zErrMsg);
     if( rc ) {
         fprintf(stderr, "Can't load module: %s\n", zErrMsg);
-        exit(0);
+        exit(1);
     } else {
         fprintf(stdout, "Loaded module successfully\n");
     }
@@ -58,7 +60,7 @@ int main() {
         "   blah2          INTEGER,\n"
         "   blah3     VARCHAR(6)\n"
         ");\n");
-    exec(db, buf);
+    if(exec(db, buf)) exit(1);
 
     /* test1 - sqlite redis backed table */
     snprintf(buf, sizeof(buf), 
@@ -67,21 +69,21 @@ int main() {
         "   blah2          INTEGER,\n"
         "   blah3     VARCHAR(6)\n"
         ");\n");
-    exec(db, buf);
+    if(exec(db, buf)) exit(1);
 
     snprintf(buf, sizeof(buf), 
         "insert into test0 "
         "(blah, blah2, blah3) "
         "values ('%s','%d', '%s')", 
         "42ea2b19af3a4678b1b71a335cf5a9ce", 1377670786, "1008");
-    exec(db, buf);
+    if(exec(db, buf)) exit(1);
 
     snprintf(buf, sizeof(buf), 
         "insert into test1 "
         "(blah, blah2, blah3) "
         "values ('%s','%d', '%s')", 
         "42ea2b19af3a4678b1b71a335cf5a9ce", 1377670786, "1008");
-    exec(db, buf);
+    if(exec(db, buf)) exit(1);
 
     exec(db, "select * from test0");
     exec(db, "select * from test1");

@@ -1,0 +1,8 @@
+
+INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/src)
+
+ADD_EXECUTABLE(driver EXCLUDE_FROM_ALL driver.c)
+TARGET_LINK_LIBRARIES(driver sqlite3)
+ADD_TEST(driver driver)
+ADD_DEPENDENCIES(check driver)
+
