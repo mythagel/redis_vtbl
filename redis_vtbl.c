@@ -415,13 +415,12 @@ static const int DEFAULT_REDIS_PORT = 6379;
 static const int DEFAULT_SENTINEL_PORT = 26379;
 
 /*-----------------------------------------------------------------------------
- * Simple transparent vector type
+ * Transparent vector type
  *----------------------------------------------------------------------------*/
 
-enum
-{
+enum {
     VECTOR_OK = 0,
-    VECTOR_ENOMEM
+    VECTOR_ENOMEM = ENOMEM
 };
 
 typedef struct vector_t {
@@ -457,8 +456,96 @@ static void vector_free(vector_t *vector, void (*value_free)(void *value)) {
     free(vector->data);
 }
 
-/*
- * Sentinel client algorithm
+
+/*-----------------------------------------------------------------------------
+ * IP Address / port type
+ *----------------------------------------------------------------------------*/
+
+enum {
+    ADDRESS_OK = 0,
+    ADDRESS_ENOMEM = ENOMEM,
+    ADDRESS_BAD_FORMAT = EINVAL
+};
+
+typedef struct address_t {
+    char *host;
+    int port;
+} address_t;
+
+static int address_init(address_t **address, const char* host, int port) {
+    address_t *addr;
+    
+    addr = malloc(sizeof(address_t));
+    if(!addr)
+        return ADDRESS_ENOMEM;
+    
+    addr->host = strndup(host, MAX_STRING_SIZE);
+    if(!addr->host) {
+        free(addr);
+        return ADDRESS_ENOMEM;
+    }
+    
+    addr->port = port;
+    *address = addr;
+    return ADDRESS_OK;
+}
+
+/* Validate address format:
+ * address | address:port */
+static int address_parse(address_t **address, const char* address_spec) {
+    address_t *addr;
+    char* pos;
+    
+    pos = strchr(address_spec, ':');
+    if(pos) {
+        int port;
+        char *end;
+        size_t addr_len;
+        
+        addr_len = pos - address_spec;
+        ++pos;
+        if(*pos == 0)
+            return ADDRESS_BAD_FORMAT;
+        
+        errno = 0;
+        port = strtol(pos, &end, 10);
+        if(errno || !port || *end)      /* out-of-range | zero | rubbish characters */
+            return ADDRESS_BAD_FORMAT;
+        
+        addr = malloc(sizeof(address_t));
+        if(!addr)
+            return ADDRESS_ENOMEM;
+        addr->host = strndup(address_spec, addr_len > MAX_STRING_SIZE ? MAX_STRING_SIZE : addr_len);
+        if(!addr->host) {
+            free(addr);
+            return ADDRESS_ENOMEM;
+        }
+        addr->port = port;
+        *address = addr;
+        return ADDRESS_OK;
+    } else {
+        return address_init(address, address_spec, 0);
+    }
+}
+
+static void address_free(address_t* address) {
+    free(address->host);
+    free(address);
+}
+
+static address_t* redisSentinelGetMasterAddress(redisContext *c, const char *service) {
+    redisReply* reply;
+    address_t *address;
+    
+    reply = redisCommand(c, "SENTINEL get-master-addr-by-name %s", service);
+    if(!reply)
+        return 0;
+    if(reply->type == REDIS_REPLY_STRING) {
+        
+    }
+}
+
+/* Sentinel client algorithm
  * track:
  *   no sentinel reachable -> error seninel down
  *   all null responses    -> master unknown
@@ -475,12 +562,36 @@ static void vector_free(vector_t *vector, void (*value_free)(void *value)) {
  *     swap head, current
  *   return connected master context
  * return appropriate error code*/
+static redisContext* redisSentinelConnect(vector_t *sentinels, const char *service) {
+    redisContext *c = 0;
+    size_t i;
+    struct timeval tv;
+    int sentinels_reached = 0;
+    int null_responses = 0;
+    
+    tv.tv_sec = 0;
+    tv.tv_usec = 250000;        /* 250ms */
+    
+    for(i = 0; i < sentinels->size; ++i) {
+        address_t *sentinel = sentinels->data[i];
+        
+        c = redisConnectWithTimeout(sentinel->host, sentinel->port, tv);
+        if(!c)
+            continue;       /* todo: Is there any point continuing if we're oom here? */
+        if(c->err) {
+            redisFree(c);
+            continue;
+        }
+        ++sentinels_reached;
+        
+    }
+    
+    return c;
+}
 
-enum
-{
+enum {
     CONNECTION_OK,
-    CONNECTION_BAD_FORMAT,
-    CONNECTION_ENOMEM
+    CONNECTION_BAD_FORMAT = EINVAL
 };
 
 typedef struct redis_vtbl_connection {
@@ -488,51 +599,6 @@ typedef struct redis_vtbl_connection {
     vector_t addresses;             /* list of redis/sentinel addresses */
 } redis_vtbl_connection;
 
-
-/* Validate address format:
- * address | address:port */
-static int redis_vtbl_connection_parse_address(const char* address_spec, int default_port, char **address, int *port) {
-    char* pos;
-    
-    pos = strchr(address_spec, ':');
-    if(pos) {
-        int p;
-        char *end;
-        size_t addr_len;
-        
-        addr_len = pos - address_spec;
-        ++pos;
-        if(*pos == 0)
-            return CONNECTION_BAD_FORMAT;
-        
-        errno = 0;
-        p = strtol(pos, &end, 10);
-        if(errno || !port || *end)      /* out-of-range | zero | rubbish characters */
-            return CONNECTION_BAD_FORMAT;
-        
-        if(port) *port = p;
-        if(address) {
-            *address = strndup(address_spec, addr_len > MAX_STRING_SIZE ? MAX_STRING_SIZE : addr_len);
-            if(!*address)
-                return CONNECTION_ENOMEM;
-        }
-        return CONNECTION_OK;
-
-    } else {
-
-        if(port) *port = default_port;
-        if(address) {
-            *address = strndup(address_spec, MAX_STRING_SIZE);
-            if(!*address)
-                return CONNECTION_ENOMEM;
-        }
-        return CONNECTION_OK;
-    }
-}
-
-static int redis_vtbl_connection_check_address(const char* address_spec) {
-    return redis_vtbl_connection_parse_address(address_spec, 0, 0, 0);
-}
 
 /* Initialise a new connection object from the given configuration.
  *
@@ -554,20 +620,18 @@ static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* c
     
     tok = strcspn(config, "\t\n\v\f\r ");
     if(!strncmp(config, "sentinel", tok)) {
+        char* pos;
         /* Validate format:
          * sentinel service-name address[:port][; address[:port]...] */
         pos = strpbrk(pos+8, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
-        
+        /* todo */
     } else {
         int res;
-        res = redis_vtbl_connection_check_address(config);
-        if(res != CONNECTION_OK)
-            return res;
+        address_t *address;
         
-        /* initialize new object */
-        char *address = strndup(config, MAX_STRING_SIZE);
-        if(!address)
-            return CONNECTION_ENOMEM;
+        res = address_parse(&address, config);
+        if(res)
+            return res;
         
         vector_init(&conn->addresses);
         vector_push(&conn->addresses, address);
