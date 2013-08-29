@@ -1,11 +1,16 @@
 #include <sqlite3ext.h>
 SQLITE_EXTENSION_INIT1
 
+#include "list.h"
+#include "vector.h"
+#include "address.h"
+
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
+
 /*
 
 NULL
@@ -414,125 +419,6 @@ static const size_t MAX_STRING_SIZE = 2048;
 static const int DEFAULT_REDIS_PORT = 6379;
 static const int DEFAULT_SENTINEL_PORT = 26379;
 
-/*-----------------------------------------------------------------------------
- * Transparent vector type
- *----------------------------------------------------------------------------*/
-
-enum {
-    VECTOR_OK = 0,
-    VECTOR_ENOMEM = ENOMEM
-};
-
-typedef struct vector_t {
-    size_t capacity;
-    size_t size;
-    void** data;
-} vector_t;
-
-static void vector_init(vector_t *vector) {
-    vector->capacity = 0;
-    vector->size = 0;
-    vector->data = 0;
-}
-
-static int vector_push(vector_t *vector, void* value) {
-    if (vector->size == vector->capacity) {
-        size_t capacity = vector->capacity ? vector->capacity*1.618 : 1;
-        void* data = realloc(vector->data, sizeof(void*)*capacity);
-        if(!data) return VECTOR_ENOMEM;
-        vector->capacity = capacity;
-        vector->data = data;
-    }
-    vector->data[vector->size++] = value;
-    return VECTOR_OK;
-}
-
-static void vector_free(vector_t *vector, void (*value_free)(void *value)) {
-    if(value_free) {
-        size_t i;
-        for(i = 0; i < vector->size; ++i)
-            value_free(vector->data[i]);
-    }
-    free(vector->data);
-}
-
-
-/*-----------------------------------------------------------------------------
- * IP Address / port type
- *----------------------------------------------------------------------------*/
-
-enum {
-    ADDRESS_OK = 0,
-    ADDRESS_ENOMEM = ENOMEM,
-    ADDRESS_BAD_FORMAT = EINVAL
-};
-
-typedef struct address_t {
-    char *host;
-    int port;
-} address_t;
-
-static int address_init(address_t **address, const char* host, int port) {
-    address_t *addr;
-    
-    addr = malloc(sizeof(address_t));
-    if(!addr)
-        return ADDRESS_ENOMEM;
-    
-    addr->host = strndup(host, MAX_STRING_SIZE);
-    if(!addr->host) {
-        free(addr);
-        return ADDRESS_ENOMEM;
-    }
-    
-    addr->port = port;
-    *address = addr;
-    return ADDRESS_OK;
-}
-
-/* Validate address format:
- * address | address:port */
-static int address_parse(address_t **address, const char* address_spec) {
-    address_t *addr;
-    char* pos;
-    
-    pos = strchr(address_spec, ':');
-    if(pos) {
-        int port;
-        char *end;
-        size_t addr_len;
-        
-        addr_len = pos - address_spec;
-        ++pos;
-        if(*pos == 0)
-            return ADDRESS_BAD_FORMAT;
-        
-        errno = 0;
-        port = strtol(pos, &end, 10);
-        if(errno || !port || *end)      /* out-of-range | zero | rubbish characters */
-            return ADDRESS_BAD_FORMAT;
-        
-        addr = malloc(sizeof(address_t));
-        if(!addr)
-            return ADDRESS_ENOMEM;
-        addr->host = strndup(address_spec, addr_len > MAX_STRING_SIZE ? MAX_STRING_SIZE : addr_len);
-        if(!addr->host) {
-            free(addr);
-            return ADDRESS_ENOMEM;
-        }
-        addr->port = port;
-        *address = addr;
-        return ADDRESS_OK;
-    } else {
-        return address_init(address, address_spec, 0);
-    }
-}
-
-static void address_free(address_t* address) {
-    free(address->host);
-    free(address);
-}
-
 static address_t* redisSentinelGetMasterAddress(redisContext *c, const char *service) {
     redisReply* reply;
     address_t *address;
@@ -543,6 +429,7 @@ static address_t* redisSentinelGetMasterAddress(redisContext *c, const char *ser
     if(reply->type == REDIS_REPLY_STRING) {
         
     }
+    return 0;
 }
 
 /* Sentinel client algorithm
@@ -562,7 +449,7 @@ static address_t* redisSentinelGetMasterAddress(redisContext *c, const char *ser
  *     swap head, current
  *   return connected master context
  * return appropriate error code*/
-static redisContext* redisSentinelConnect(vector_t *sentinels, const char *service) {
+static redisContext* redisSentinelConnect(list_t *sentinels, const char *service) {
     redisContext *c = 0;
     size_t i;
     struct timeval tv;
@@ -623,18 +510,18 @@ static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* c
         char* pos;
         /* Validate format:
          * sentinel service-name address[:port][; address[:port]...] */
-        pos = strpbrk(pos+8, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
+        pos = strpbrk(config+tok, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
         /* todo */
     } else {
         int res;
-        address_t *address;
+        address_t address;
         
-        res = address_parse(&address, config);
+        res = address_parse(&address, config, DEFAULT_REDIS_PORT);
         if(res)
             return res;
         
-        vector_init(&conn->addresses);
-        vector_push(&conn->addresses, address);
+        vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
+        vector_push(&conn->addresses, &address);
     }
     return CONNECTION_OK;
 }
@@ -678,7 +565,7 @@ struct redis_vtbl_vtab {
     
     redisContext *c;
     char *key_base;
-    vector_t columns;
+    list_t columns;
 };
 
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
@@ -712,7 +599,7 @@ struct redis_vtbl_cursor {
     sqlite3_int64* row;
     sqlite3_int64* current_row;
     
-    vector_t columns;
+    list_t columns;
 };
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor) {

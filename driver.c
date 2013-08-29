@@ -4,6 +4,7 @@
 
 static int callback(void *NotUsed, int argc, char **argv, char **azColName) {
     int i;
+    (void)NotUsed;
     
     for(i=0; i < argc; ++i)
         printf("%-20s: %-20s\n", azColName[i], argv[i] ? argv[i] : "NULL");
@@ -25,7 +26,7 @@ void exec(sqlite3 *db, const char* sql) {
     }
 }
 
-int main(int argc, char* argv[]) {
+int main() {
     sqlite3 *db;
     char *zErrMsg = 0;
     int  rc;
