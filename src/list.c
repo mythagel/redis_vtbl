@@ -38,6 +38,16 @@ int list_push(list_t *list, void *value) {
     return LIST_OK;
 }
 
+void* list_find(list_t *list, void *value, int (*cmp)(void *l, void *r)) {
+    size_t index;
+    for(index = 0; index < list->size; ++index) {
+        void *lvalue = list_get(list, index);
+        if(cmp(lvalue, value) == 0)
+            return lvalue;
+    }
+    return 0;
+}
+
 void list_free(list_t *list) {
     if(list->value_free) {
         size_t i;

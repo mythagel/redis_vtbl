@@ -28,6 +28,7 @@ typedef struct list_t {
 void  list_init(list_t *list, void (*value_free)(void *value));
 void* list_get(list_t *list, size_t index);
 int   list_push(list_t *list, void *value);
+void* list_find(list_t *list, void *value, int (*cmp)(void *l, void *r));
 void  list_free(list_t *list);
 
 #endif /* LIST_H_ */
