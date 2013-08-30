@@ -22,6 +22,14 @@ int address_init(address_t *addr, const char *host, int port) {
     return ADDRESS_OK;
 }
 
+int address_cmp(const address_t *l, const address_t *r) {
+    int diff = strcmp(l->host, r->host);
+    if(diff) return diff;
+    if(l->port < r->port) return -1;
+    if(l->port > r->port) return 1;
+    return 0;
+}
+
 /* Validate address format:
  * address | address:port */
 int address_parse(address_t *addr, const char *address_spec, int default_port) {

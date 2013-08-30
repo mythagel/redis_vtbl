@@ -25,6 +25,7 @@ typedef struct address_t {
 } address_t;
 
 int  address_init(address_t *addr, const char *host, int port);
+int  address_cmp(const address_t *l, const address_t *r);
 int  address_parse(address_t *addr, const char *address_spec, int default_port);
 void address_free(address_t *address);
 
