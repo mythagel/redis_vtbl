@@ -4,6 +4,7 @@ SQLITE_EXTENSION_INIT1
 #include "list.h"
 #include "vector.h"
 #include "address.h"
+#include "sentinel.h"
 
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
@@ -415,67 +416,6 @@ any iteration needs to lookup in the set.
 /*    return SQLITE_OK;*/
 /*}*/
 
-static const size_t MAX_STRING_SIZE = 2048;
-static const int DEFAULT_REDIS_PORT = 6379;
-static const int DEFAULT_SENTINEL_PORT = 26379;
-
-static address_t* redisSentinelGetMasterAddress(redisContext *c, const char *service) {
-    redisReply* reply;
-    address_t *address;
-    
-    reply = redisCommand(c, "SENTINEL get-master-addr-by-name %s", service);
-    if(!reply)
-        return 0;
-    if(reply->type == REDIS_REPLY_STRING) {
-        
-    }
-    return 0;
-}
-
-/* Sentinel client algorithm
- * track:
- *   no sentinel reachable -> error seninel down
- *   all null responses    -> master unknown
- *
- * for each sentinel address
- *   redisConnectWithTimeout(ip, port, short tv);
- *     fail -> continue
- *   SENTINEL get-master-addr-by-name master-name
- *     fail -> continue
- *   master ip:port received
- *   connect to master
- *     fail -> continue
- *   if sentinel not at head of list
- *     swap head, current
- *   return connected master context
- * return appropriate error code*/
-static redisContext* redisSentinelConnect(list_t *sentinels, const char *service) {
-    redisContext *c = 0;
-    size_t i;
-    struct timeval tv;
-    int sentinels_reached = 0;
-    int null_responses = 0;
-    
-    tv.tv_sec = 0;
-    tv.tv_usec = 250000;        /* 250ms */
-    
-    for(i = 0; i < sentinels->size; ++i) {
-        address_t *sentinel = sentinels->data[i];
-        
-        c = redisConnectWithTimeout(sentinel->host, sentinel->port, tv);
-        if(!c)
-            continue;       /* todo: Is there any point continuing if we're oom here? */
-        if(c->err) {
-            redisFree(c);
-            continue;
-        }
-        ++sentinels_reached;
-        
-    }
-    
-    return c;
-}
-
 enum {
     CONNECTION_OK,
     CONNECTION_BAD_FORMAT = EINVAL
@@ -513,12 +453,12 @@ static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* c
         pos = strpbrk(config+tok, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
         /* todo */
     } else {
-        int res;
+        int err;
         address_t address;
         
-        res = address_parse(&address, config, DEFAULT_REDIS_PORT);
-        if(res)
-            return res;
+        err = address_parse(&address, config, DEFAULT_REDIS_PORT);
+        if(err)
+            return err;
         
         vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
         vector_push(&conn->addresses, &address);
