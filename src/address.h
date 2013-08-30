@@ -12,14 +12,15 @@
  * IP Address / port type
  *----------------------------------------------------------------------------*/
 
+#define ADDRESS_MAX_HOST_LEN 256     /* IPv4 15; IPv6 45; DNS 253 */
+
 enum {
     ADDRESS_OK = 0,
-    ADDRESS_ENOMEM,
     ADDRESS_BAD_FORMAT
 };
 
 typedef struct address_t {
-    char *host;
+    char host[ADDRESS_MAX_HOST_LEN];
     int port;
 } address_t;
 

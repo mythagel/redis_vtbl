@@ -20,3 +20,7 @@ REGISTER_TEST(test_vector)
 ADD_EXECUTABLE(test_list EXCLUDE_FROM_ALL test_list.c ${PROJECT_SOURCE_DIR}/src/list.c)
 TARGET_LINK_LIBRARIES(test_list m)
 REGISTER_TEST(test_list)
+
+ADD_EXECUTABLE(test_address EXCLUDE_FROM_ALL test_address.c ${PROJECT_SOURCE_DIR}/src/address.c)
+TARGET_LINK_LIBRARIES(test_address m)
+REGISTER_TEST(test_address)

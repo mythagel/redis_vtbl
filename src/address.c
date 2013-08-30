@@ -10,17 +10,14 @@
 #include <errno.h>
 #include <stdlib.h>
 
-static const size_t MAX_STRING_SIZE = 2048;
-
 /*-----------------------------------------------------------------------------
  * IP Address / port type
  *----------------------------------------------------------------------------*/
 
 int address_init(address_t *addr, const char *host, int port) {
-    addr->host = strndup(host, MAX_STRING_SIZE);
-    if(!addr->host)
-        return ADDRESS_ENOMEM;
+    if(strlen(host) >= ADDRESS_MAX_HOST_LEN) return ADDRESS_BAD_FORMAT;
     
+    strcpy(addr->host, host);
     addr->port = port;
     return ADDRESS_OK;
 }
@@ -46,9 +43,9 @@ int address_parse(address_t *addr, const char *address_spec, int default_port) {
         if(errno || !port || *end)      /* out-of-range | zero | rubbish characters */
             return ADDRESS_BAD_FORMAT;
         
-        addr->host = strndup(address_spec, addr_len > MAX_STRING_SIZE ? MAX_STRING_SIZE : addr_len);
-        if(!addr->host)
-            return ADDRESS_ENOMEM;
+        if(addr_len >= ADDRESS_MAX_HOST_LEN) return ADDRESS_BAD_FORMAT;
+        strncpy(addr->host, address_spec, addr_len);
+        addr->host[addr_len] = 0;
         addr->port = port;
         return ADDRESS_OK;
     } else {
@@ -57,6 +54,7 @@ int address_parse(address_t *addr, const char *address_spec, int default_port) {
 }
 
 void address_free(address_t *address) {
-    free(address->host);
+    (void)address;
+    /*noop*/
 }
 
