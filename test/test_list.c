@@ -2,6 +2,25 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <assert.h>
+
+int test_strtok() {
+    size_t i;
+    int err;
+    list_t list;
+    
+    err = list_strtok(&list, "hello there are five words", " ");
+    assert(!err);
+    
+    for(i = 0; i < list.size; ++i) {
+        char *c;
+        
+        c = list_get(&list, i);
+        printf("%s\n", c);
+    }
+    
+    list_free(&list);
+}
 
 int main() {
     size_t i;
@@ -20,5 +39,7 @@ int main() {
     }
     printf("\n");
     list_free(&l);
+    
+    test_strtok();
     return 0;
 }
