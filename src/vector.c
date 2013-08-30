@@ -42,6 +42,16 @@ int vector_push(vector_t *vector, void *value) {
     return VECTOR_OK;
 }
 
+void* vector_find(vector_t *vector, void *value, int (*cmp)(void *l, void *r)) {
+    size_t index;
+    for(index = 0; index < vector->size; ++index) {
+        void *lvalue = vector_get(vector, index);
+        if(cmp(lvalue, value) == 0)
+            return lvalue;
+    }
+    return 0;
+}
+
 void vector_free(vector_t *vector) {
     if(vector->value_free) {
         size_t i;

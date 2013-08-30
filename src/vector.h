@@ -29,6 +29,7 @@ typedef struct vector_t {
 void  vector_init(vector_t *vector, size_t elem_size, void (*value_free)(void *value));
 void* vector_get(vector_t *vector, size_t index);
 int   vector_push(vector_t *vector, void *value);
+void* vector_find(vector_t *vector, void *value, int (*cmp)(void *l, void *r));
 void  vector_free(vector_t *vector);
 
 #endif /* VECTOR_H_ */
