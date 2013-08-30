@@ -28,7 +28,7 @@ void* vector_get(vector_t *vector, size_t index) {
     return vector->data + (vector->elem_size * index);
 }
 
-int vector_push(vector_t *vector, void* value) {
+int vector_push(vector_t *vector, void *value) {
     if (vector->size == vector->capacity) {
         size_t capacity = vector->capacity ? ceil(vector->capacity*1.618) : 1;
         void* data = realloc(vector->data, vector->elem_size*capacity);
