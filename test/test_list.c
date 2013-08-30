@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <assert.h>
 
-int test_strtok() {
+void test_strtok() {
     size_t i;
     int err;
     list_t list;
