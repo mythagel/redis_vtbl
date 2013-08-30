@@ -9,7 +9,6 @@ SQLITE_EXTENSION_INIT1
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <ctype.h>
 
 /*
@@ -28,7 +27,7 @@ column names are keys in the hash
 when creating a table, need
 argv[1] - database name
 argv[2] - table name
-argv[3] - address of redis e.g. "127.0.0.1:6379;192.168.1.1;192.168.1.2"
+argv[3] - address of redis e.g. "127.0.0.1:6379 192.168.1.1 192.168.1.2"
 argv[4] - key prefix
 
 
@@ -418,7 +417,7 @@ any iteration needs to lookup in the set.
 
 enum {
     CONNECTION_OK,
-    CONNECTION_BAD_FORMAT = EINVAL
+    CONNECTION_BAD_FORMAT
 };
 
 typedef struct redis_vtbl_connection {
@@ -426,16 +425,14 @@ typedef struct redis_vtbl_connection {
     vector_t addresses;             /* list of redis/sentinel addresses */
 } redis_vtbl_connection;
 
-
 /* Initialise a new connection object from the given configuration.
  *
  * address[:port]
  * A connection to a single redis instance
  *
- * sentinel service-name address[:port][; address[:port]...]
+ * sentinel service-name address[:port][ address[:port]...]
  * A connection to the redis sentinel service at the given addresses. */
-static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* config) {
-    size_t tok;
+static int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) {
     
     while(config && isspace(*config))
         ++config;
@@ -445,13 +442,43 @@ static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* c
     
     conn->service = 0;
     
-    tok = strcspn(config, "\t\n\v\f\r ");
-    if(!strncmp(config, "sentinel", tok)) {
-        char* pos;
-        /* Validate format:
-         * sentinel service-name address[:port][; address[:port]...] */
-        pos = strpbrk(config+tok, "\t\n\v\f\r ");     /* 8 - strlen("sentinel") */
-        /* todo */
+    /* Validate format:
+     * sentinel service-name address[:port][; address[:port]...] */
+    if(!strncmp(config, "sentinel ", /* strlen("sentinel ") */9)) {
+        int err;
+        size_t i;
+        list_t tok_list;
+        
+        err = list_strtok(&tok_list, config, " \t\n");
+        if(err) return CONNECTION_BAD_FORMAT;
+
+        if(tok_list.size < 3) {
+            list_free(&tok_list);
+            return CONNECTION_BAD_FORMAT;
+        }
+
+        if(strcmp(list_get(&tok_list, 0), "sentinel")) {
+            list_free(&tok_list);
+            return CONNECTION_BAD_FORMAT;
+        }
+
+        conn->service = list_set(&tok_list, 1, 0);
+        vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
+
+        for(i = 2; i < tok_list.size; ++i) {
+            address_t address;
+            
+            err = address_parse(&address, list_get(&tok_list, i), DEFAULT_SENTINEL_PORT);
+            if(err) {
+                list_free(&tok_list);
+                free(conn->service);
+                vector_free(&conn->addresses);
+                return CONNECTION_BAD_FORMAT;
+            }
+            vector_push(&conn->addresses, &address);
+        }
+        list_free(&tok_list);
+        
     } else {
         int err;
         address_t address;
@@ -466,18 +493,17 @@ static int redis_vtbl_connection_init(redis_vtbl_connection* conn, const char* c
     return CONNECTION_OK;
 }
 
+static void redis_vtbl_connection_free(redis_vtbl_connection *conn) {
+    free(conn->service);
+    vector_free(&conn->addresses);
+}
+
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table.[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
  * prefix.db.table.index.rowid  = master index (set) of rows in the table
  * prefix.db.table.index.x      = additional set(rowid) index(s) for column x*/
 
-/* argv[1]    - database name
- * argv[2]    - table name
- * argv[3]    - address of redis e.g. "127.0.0.1:6379"
- * argv[3]    - address(es) of sentinel "sentinel service-name 127.0.0.1:6379;192.168.1.1"
- * argv[4]    - key prefix
- * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo);
@@ -504,15 +530,53 @@ struct redis_vtbl_vtab {
     sqlite3_vtab base;
     
     redisContext *c;
+    redis_vtbl_connection conn_spec;
     char *key_base;
     list_t columns;
 };
 
+/* argv[1]    - database name
+ * argv[2]    - table name
+ * argv[3]    - address of redis e.g. "127.0.0.1:6379"
+ * argv[3]    - address(es) of sentinel "sentinel service-name 127.0.0.1:6379;192.168.1.1"
+ * argv[4]    - key prefix
+ * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
+    size_t i;
+    list_t column;
+    
+    if(argc < 6) {
+        *pzErr = sqlite3_mprintf("Expected ip:port | sentinel service ip:port [ip:port...], prefix, column0, ...columnN");
+        return SQLITE_ERROR;
+    }
+
+    const char* db = argv[1];
+    const char* table = argv[2];
+    const char* conn_config = argv[3];
+    const char* prefix = argv[4];
+    
+    list_init(&column, 0);
+    for(i = 5; i < argc; ++i)
+        list_push(&column, argv[i]);
+    
+/*            s << "CREATE TABLE xxxx(";*/
+/*            for(auto it = begin(column_def); it != end(column_def);)*/
+/*            {*/
+/*                s << *it;*/
+/*                ++it;*/
+/*                if(it != end(column_def))*/
+/*                    s << ", ";*/
+/*            }*/
+/*            s << ")";*/
+/*    */
+/*            sqlite3_declare_vtab(db, s.str().c_str());*/
+    
+    list_free(&column);
+    
     return SQLITE_ERROR;
 }
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {
-    return SQLITE_ERROR;
+    return redis_vtbl_create(db, pAux, argc, argv, ppVTab, pzErr);
 }
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
     return SQLITE_ERROR;
@@ -521,7 +585,7 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
     return SQLITE_ERROR;
 }
 static int redis_vtbl_disconnect(sqlite3_vtab *pVTab) {
-    return SQLITE_ERROR;
+    return redis_vtbl_destroy(pVTab);
 }
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
     return SQLITE_ERROR;
