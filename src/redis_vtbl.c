@@ -535,6 +535,19 @@ struct redis_vtbl_vtab {
     list_t columns;
 };
 
+int string_append(char** str, const char* src) {
+    char* s;
+    size_t str_sz = *str ? strlen(*str) : 0;
+    size_t src_sz = strlen(src);
+    
+    s = realloc(*str, str_sz+src_sz+1);
+    if(!s) return 1;
+    *str = s;
+    strcpy(*str + str_sz, src);
+    *str[str_sz+src_sz] = 0;
+    return 0;
+}
+
 /* argv[1]    - database name
  * argv[2]    - table name
  * argv[3]    - address of redis e.g. "127.0.0.1:6379"
@@ -542,7 +555,7 @@ struct redis_vtbl_vtab {
  * argv[4]    - key prefix
  * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
-    size_t i;
+    int i;
     list_t column;
     
     if(argc < 6) {
@@ -550,29 +563,28 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
         return SQLITE_ERROR;
     }
 
-    const char* db = argv[1];
+    const char* db_name = argv[1];
     const char* table = argv[2];
     const char* conn_config = argv[3];
     const char* prefix = argv[4];
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
-        list_push(&column, argv[i]);
+        list_push(&column, (char*)argv[i]);
     
-/*            s << "CREATE TABLE xxxx(";*/
-/*            for(auto it = begin(column_def); it != end(column_def);)*/
-/*            {*/
-/*                s << *it;*/
-/*                ++it;*/
-/*                if(it != end(column_def))*/
-/*                    s << ", ";*/
-/*            }*/
-/*            s << ")";*/
-/*    */
-/*            sqlite3_declare_vtab(db, s.str().c_str());*/
+    char* s = 0;
+    string_append(&s, "CREATE TABLE xxxx(");
+    for(i = 0; i < column.size; ) {
+        string_append(&s, list_get(&column, i));
+        ++i;
+        if(i < column.size)
+            string_append(&s, ", ");
+    }
+    string_append(&s, ")");
+    sqlite3_declare_vtab(db, s);
+    free(s);
     
     list_free(&column);
-    
     return SQLITE_ERROR;
 }
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {
