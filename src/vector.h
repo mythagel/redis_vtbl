@@ -22,7 +22,7 @@ typedef struct vector_t {
     size_t elem_size;
     size_t capacity;
     size_t size;
-    void** data;
+    void* data;
     void (*value_free)(void *value);
 } vector_t;
 

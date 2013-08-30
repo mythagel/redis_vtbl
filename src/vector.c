@@ -8,6 +8,7 @@
 #include "vector.h"
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /*-----------------------------------------------------------------------------
  * Transparent vector type
@@ -29,7 +30,7 @@ void* vector_get(vector_t *vector, size_t index) {
 
 int vector_push(vector_t *vector, void* value) {
     if (vector->size == vector->capacity) {
-        size_t capacity = vector->capacity ? vector->capacity*1.618 : 1;
+        size_t capacity = vector->capacity ? ceil(vector->capacity*1.618) : 1;
         void* data = realloc(vector->data, vector->elem_size*capacity);
         if(!data) return VECTOR_ENOMEM;
         vector->capacity = capacity;
@@ -44,8 +45,10 @@ int vector_push(vector_t *vector, void* value) {
 void vector_free(vector_t *vector) {
     if(vector->value_free) {
         size_t i;
-        for(i = 0; i < vector->size; ++i)
-            vector->value_free(vector->data[i]);
+        for(i = 0; i < vector->size; ++i) {
+            void* value = vector_get(vector, i);
+            vector->value_free(value);
+        }
     }
     free(vector->data);
 }

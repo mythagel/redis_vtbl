@@ -7,6 +7,7 @@
 
 #include "list.h"
 #include <stdlib.h>
+#include <math.h>
 
 /*-----------------------------------------------------------------------------
  * Transparent list type
@@ -19,9 +20,15 @@ void list_init(list_t *list, void (*value_free)(void *value)) {
     list->value_free = value_free;
 }
 
-int list_add(list_t *list, void* value) {
+void* list_get(list_t *list, size_t index) {
+    if(index > list->size)
+        return 0;
+    return list->data[index];
+}
+
+int list_push(list_t *list, void* value) {
     if (list->size == list->capacity) {
-        size_t capacity = list->capacity ? list->capacity*1.618 : 1;
+        size_t capacity = list->capacity ? ceil(list->capacity*1.618) : 1;
         void* data = realloc(list->data, sizeof(void*)*capacity);
         if(!data) return LIST_ENOMEM;
         list->capacity = capacity;
