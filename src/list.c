@@ -8,6 +8,7 @@
 #include "list.h"
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 
 /*-----------------------------------------------------------------------------
  * Transparent list type
@@ -26,10 +27,20 @@ void* list_get(list_t *list, size_t index) {
     return list->data[index];
 }
 
+void* list_set(list_t *list, size_t index, void *value) {
+    void *old;
+    if(index > list->size)
+        return 0;
+    
+    old = list->data[index];
+    list->data[index] = value;
+    return old;
+}
+
 int list_push(list_t *list, void *value) {
     if (list->size == list->capacity) {
         size_t capacity = list->capacity ? ceil(list->capacity*1.618) : 1;
-        void* data = realloc(list->data, sizeof(void*)*capacity);
+        void **data = realloc(list->data, sizeof(void*)*capacity);
         if(!data) return LIST_ENOMEM;
         list->capacity = capacity;
         list->data = data;
@@ -55,5 +66,34 @@ void list_free(list_t *list) {
             list->value_free(list->data[i]);
     }
     free(list->data);
+}
+
+int list_strtok(list_t *list, const char *text, const char *delim) {
+    char *token;
+    char *buffer;
+    char *state;
+    
+    list_init(list, free);
+    buffer = strdup(text);
+    if(!buffer) {
+        list_free(list);
+        return 1;
+    }
+    
+    token = strtok_r(buffer, delim, &state);
+    while(token) {
+        char *str = strdup(token);
+        if(!str) {
+            free(buffer);
+            list_free(list);
+            return 1;
+        }
+        
+        list_push(list, str);
+        token = strtok_r(0, delim, &state);
+    }
+    
+    free(buffer);
+    return 0;
 }
 

@@ -27,8 +27,11 @@ typedef struct list_t {
 
 void  list_init(list_t *list, void (*value_free)(void *value));
 void* list_get(list_t *list, size_t index);
+void* list_set(list_t *list, size_t index, void *value);
 int   list_push(list_t *list, void *value);
 void* list_find(list_t *list, void *value, int (*cmp)(void *l, void *r));
 void  list_free(list_t *list);
+
+int   list_strtok(list_t *list, const char *text, const char *delim);
 
 #endif /* LIST_H_ */
