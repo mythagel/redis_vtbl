@@ -7,18 +7,18 @@
 void int_test()
 {
     int n;
-    size_t i;
+    int* it;
     vector_t v;
     vector_init(&v, sizeof(int), 0);
     
+    vector_reserve(&v, 100);
     for(n = 0; n < 100; ++n) {
         printf("push: %d\n", n);
         vector_push(&v, &n);
     }
     
-    for(i = 0; i < v.size; ++i) {
-        int n = *((int*)vector_get(&v, i));
-        printf("%d ", n);
+    for(it = vector_begin(&v); it != vector_end(&v); ++it) {
+        printf("%d ", *it);
     }
     printf("\n");
     vector_free(&v);

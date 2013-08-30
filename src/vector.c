@@ -22,10 +22,28 @@ void vector_init(vector_t *vector, size_t elem_size, void (*value_free)(void *va
     vector->value_free = value_free;
 }
 
+int vector_reserve(vector_t *vector, size_t count) {
+    if(vector->capacity < count) {
+        size_t capacity = count;
+        void* data = realloc(vector->data, vector->elem_size*capacity);
+        if(!data) return VECTOR_ENOMEM;
+        vector->capacity = capacity;
+        vector->data = data;
+    }
+    return VECTOR_OK;
+}
+
 void* vector_get(vector_t *vector, size_t index) {
     if(index >= vector->size)
         return 0;
     return vector->data + (vector->elem_size * index);
+}
+
+void* vector_begin(vector_t *vector) {
+    return vector->data;
+}
+void* vector_end(vector_t *vector) {
+    return vector->data + (vector->elem_size * vector->size);
 }
 
 int vector_push(vector_t *vector, void *value) {
