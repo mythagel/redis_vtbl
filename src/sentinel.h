@@ -17,9 +17,10 @@ enum {
     SENTINEL_OK,
     SENTINEL_ERROR,
     SENTINEL_MASTER_NAME_UNKNOWN,
-    SENTINEL_MASTER_UNKNOWN
+    SENTINEL_MASTER_UNKNOWN,
+    SENTINEL_UNREACHABLE
 };
 
-redisContext* redisSentinelConnect(vector_t *sentinels, const char *service);
+int redisSentinelConnect(vector_t *sentinels, const char *service, redisContext **master_context);
 
 #endif /* SENTINEL_H_ */

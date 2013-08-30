@@ -30,7 +30,7 @@ static int redisSentinelRefreshSentinelList(redisContext *cs, const char *servic
  *   return connected master context
  * return appropriate error code*/
 
-redisContext* redisSentinelConnect(vector_t *sentinels, const char *service) {
+int redisSentinelConnect(vector_t *sentinels, const char *service, redisContext **master_context) {
     redisContext *c = 0;
     
     size_t i;
@@ -42,6 +42,8 @@ redisContext* redisSentinelConnect(vector_t *sentinels, const char *service) {
     
     tv.tv_sec = 0;
     tv.tv_usec = 250000;        /* 250ms */
+    
+    *master_context = 0;
     
     for(i = 0; i < sentinels->size; ++i) {
         int err;
@@ -84,18 +86,26 @@ redisContext* redisSentinelConnect(vector_t *sentinels, const char *service) {
         ++sentinels_reached;
         
         c = redisConnect(master.host, master.port);
+        address_free(&master);
+        
         if(!c)
             continue;       /* todo: Is there any point continuing if we're oom here? */
         if(c->err) {
             redisFree(c);
+            c = 0;
             continue;
         }
         
         /* we are connected to master. */
+        *master_context = c;
         break;
     }
     
-    return c;
+    if(*master_context)    return SENTINEL_OK;
+    if(!sentinels_reached) return SENTINEL_UNREACHABLE;
+    if(master_unknown)     return SENTINEL_MASTER_UNKNOWN;
+    if(name_unknown)       return SENTINEL_MASTER_NAME_UNKNOWN;
+    /* ... */              return SENTINEL_ERROR;
 }
 
 static int redisSentinelGetMasterAddress(redisContext *cs, const char *service, address_t* address) {
@@ -140,8 +150,8 @@ static int redisSentinelRefreshSentinelList(redisContext *cs, const char *servic
                 err = address_parse(&sentinel, reply->str, DEFAULT_REDIS_PORT);
                 if(err) continue;
                 
-                /* destermine if this sentinel address is already in the vector */
                 exists = vector_find(sentinels, &sentinel, (int (*)(void *, void *))address_cmp);
+                
                 if(!exists) vector_push(sentinels, &sentinel);
             }
         }
