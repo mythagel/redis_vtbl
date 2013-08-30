@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <assert.h>
 
 void int_test()
 {
@@ -58,6 +59,9 @@ void struct_test()
         test* t = vector_get(&v, i);
         printf("a: %d b: %f c: %s\n", t->a, t->b, t->c);
     }
+    
+    assert(!vector_get(&v, 999));
+    
     vector_free(&v);
 }
 
