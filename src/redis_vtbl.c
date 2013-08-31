@@ -493,6 +493,22 @@ static int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *c
     return CONNECTION_OK;
 }
 
+static int redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c) {
+    int err;
+    
+    if(conn->service) {     /* sentinel */
+        err = redisSentinelConnect(&conn->addresses, conn->service, c);
+        return err;
+    
+    } else {                /* redis */
+        address_t* redis;
+        
+        redis = vector_get(&conn->addresses, 0);
+        *c = redisConnect(redis->host, redis->port);
+        return *c ? 0 : 1;
+    }
+}
+
 static void redis_vtbl_connection_free(redis_vtbl_connection *conn) {
     free(conn->service);
     vector_free(&conn->addresses);
@@ -526,16 +542,7 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
  * Redis backed Virtual table
  *----------------------------------------------------------------------------*/
 
-struct redis_vtbl_vtab {
-    sqlite3_vtab base;
-    
-    redisContext *c;
-    redis_vtbl_connection conn_spec;
-    char *key_base;
-    list_t columns;
-};
-
-int string_append(char** str, const char* src) {
+static int string_append(char** str, const char* src) {
     char* s;
     size_t str_sz = *str ? strlen(*str) : 0;
     size_t src_sz = strlen(src);
@@ -548,6 +555,48 @@ int string_append(char** str, const char* src) {
     return 0;
 }
 
+typedef struct redis_vtbl_vtab {
+    sqlite3_vtab base;
+    
+    redis_vtbl_connection conn_spec;
+    redisContext *c;
+    char *key_base;
+    list_t columns;
+} redis_vtbl_vtab;
+
+static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix) {
+    int err;
+    
+    memset(&vtab->base, 0, sizeof(sqlite3_vtab));
+    
+    err = redis_vtbl_connection_init(&vtab->conn_spec, conn_config);
+    if(err) return err;
+    
+    vtab->c = 0;
+    
+    string_append(&vtab->key_base, prefix);
+    string_append(&vtab->key_base, ".");
+    string_append(&vtab->key_base, db);
+    string_append(&vtab->key_base, ".");
+    string_append(&vtab->key_base, table);
+    
+    if(!vtab->key_base) {
+        redis_vtbl_connection_free(&vtab->conn_spec);
+        return 1;   /* todo normalise error reporting. */
+    }
+    
+    list_init(&vtab->columns, free);
+    
+    return 0;
+}
+
+static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
+    redis_vtbl_connection_free(&vtab->conn_spec);
+    redisFree(vtab->c);
+    free(vtab->key_base);
+    list_free(&vtab->columns);
+}
+
 /* argv[1]    - database name
  * argv[2]    - table name
  * argv[3]    - address of redis e.g. "127.0.0.1:6379"
@@ -556,28 +605,53 @@ int string_append(char** str, const char* src) {
  * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
     int i;
+    size_t n;
+    int err;
     list_t column;
+    redis_vtbl_vtab *vtab;
     
     if(argc < 6) {
         *pzErr = sqlite3_mprintf("Expected ip:port | sentinel service ip:port [ip:port...], prefix, column0, ...columnN");
         return SQLITE_ERROR;
     }
 
-    const char* db_name = argv[1];
-    const char* table = argv[2];
-    const char* conn_config = argv[3];
-    const char* prefix = argv[4];
+    /* Tasks:
+     * Parse arguments
+     * create vtab structure
+     * Connect to redis
+     * Declare table to sqlite
+     */
+
+    const char *db_name = argv[1];
+    const char *table = argv[2];
+    const char *conn_config = argv[3];
+    const char *prefix = argv[4];
+    
+    // init vtable structute.
+    vtab = malloc(sizeof(redis_vtbl_vtab));
+    if(!vtab) return SQLITE_NOMEM;
+    
+    err = redis_vtbl_vtab_init(vtab, conn_config, db_name, table, prefix);
+    if(err) {
+        free(vtab);
+        /* todo map error code and provide error string */
+        return SQLITE_ERROR;
+    }
+    
+    err = redis_vtbl_connection_connect(&vtab->conn_spec, &vtab->c);
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
     
+    
+    // only declare the table if redis connection is established.
     char* s = 0;
     string_append(&s, "CREATE TABLE xxxx(");
-    for(i = 0; i < column.size; ) {
-        string_append(&s, list_get(&column, i));
-        ++i;
-        if(i < column.size)
+    for(n = 0; n < column.size; ) {
+        string_append(&s, list_get(&column, n));
+        ++n;
+        if(n < column.size)
             string_append(&s, ", ");
     }
     string_append(&s, ")");
@@ -585,7 +659,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     free(s);
     
     list_free(&column);
-    return SQLITE_ERROR;
+    return SQLITE_OK;
 }
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {
     return redis_vtbl_create(db, pAux, argc, argv, ppVTab, pzErr);
@@ -600,7 +674,12 @@ static int redis_vtbl_disconnect(sqlite3_vtab *pVTab) {
     return redis_vtbl_destroy(pVTab);
 }
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
-    return SQLITE_ERROR;
+    redis_vtbl_vtab *vtab;
+    
+    vtab = (redis_vtbl_vtab*)pVTab;
+    redis_vtbl_vtab_free(vtab);
+    free(vtab);
+    return SQLITE_OK;
 }
 
 
