@@ -550,8 +550,8 @@ static int string_append(char** str, const char* src) {
     s = realloc(*str, str_sz+src_sz+1);
     if(!s) return 1;
     *str = s;
-    strcpy(*str + str_sz, src);
-    *str[str_sz+src_sz] = 0;
+    strcpy(s + str_sz, src);
+    s[str_sz+src_sz] = 0;
     return 0;
 }
 
@@ -573,6 +573,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     if(err) return err;
     
     vtab->c = 0;
+    vtab->key_base = 0;
     
     string_append(&vtab->key_base, prefix);
     string_append(&vtab->key_base, ".");
@@ -616,8 +617,8 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     }
 
     /* Tasks:
-     * Parse arguments
      * create vtab structure
+     * Parse arguments
      * Connect to redis
      * Declare table to sqlite
      */
@@ -639,6 +640,10 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     }
     
     err = redis_vtbl_connection_connect(&vtab->conn_spec, &vtab->c);
+    if(err) {
+        redis_vtbl_vtab_free(vtab);
+        free(vtab);
+    }
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
