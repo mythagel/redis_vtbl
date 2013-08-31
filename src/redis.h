@@ -10,7 +10,6 @@
 #include <stdint.h>
 #include "vector.h"
 #include <hiredis/hiredis.h>
-#include <string.h>
 
 /*-----------------------------------------------------------------------------
  * Redis helpers
