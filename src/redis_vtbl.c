@@ -643,12 +643,12 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     if(err) {
         redis_vtbl_vtab_free(vtab);
         free(vtab);
+        return SQLITE_ERROR;
     }
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
-    
     
     // only declare the table if redis connection is established.
     char* s = 0;
@@ -664,6 +664,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     free(s);
     
     list_free(&column);
+    *ppVTab = vtab;
     return SQLITE_OK;
 }
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {
