@@ -542,21 +542,38 @@ static int eq_rowid_p(const struct sqlite3_index_constraint *constraint) {
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
     redis_vtbl_vtab *vtab;
     int i;
+    int cons_idx = 0;
     
     vtab = (redis_vtbl_vtab*)pVTab;
     
     pIndexInfo->idxNum = CURSOR_INDEX_LINEAR;
     pIndexInfo->estimatedCost = 1000.0;         /* todo retrieve row estimate from redis on connect. */
     
-    for( i = 0; i < pIndexInfo->nConstraint; ++i) {
+    for(i = 0; i < pIndexInfo->nConstraint; ++i) {
+        const char *column_name;
+        const char *index_name;
         struct sqlite3_index_constraint *constraint = &pIndexInfo->aConstraint[i];
         if(!constraint->usable) continue;
         
         if(eq_rowid_p(constraint)) {
             pIndexInfo->idxNum = CURSOR_INDEX_ROWID;
             pIndexInfo->estimatedCost = 1.0;
+            break;
         }
         
+        if(constraint->iColumn == -1) {
+            // other constraints on the rowid
+        } else {
+        
+            /* lookup the column name by id
+             * Determine if that column is indexed */
+            column_name = list_get(&vtab->columns, constraint->iColumn);
+            if(!column_name) return SQLITE_ERROR;
+            
+            index_name = vector_bsearch(&vtab->index, column_name, strcmp);
+            
+            /*pIndexInfo->aConstraintUsage[x].argvIndex = ++cons_idx;*/
+        }
     }
     
     return SQLITE_OK;
