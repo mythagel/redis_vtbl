@@ -6,6 +6,7 @@ SQLITE_EXTENSION_INIT1
 #include "address.h"
 #include "sentinel.h"
 #include "connection.h"
+#include "redis.h"
 
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
@@ -63,33 +64,6 @@ any iteration needs to lookup in the set.
 /*    } type;*/
 /*    int min;*/
 /*    int max;*/
-/*};*/
-
-/*struct vtab : sqlite3_vtab*/
-/*{*/
-/*    hiredis::context c;*/
-/*    std::string key_base;*/
-/*    std::vector<std::string> columns;*/
-/*    */
-/*    vtab(const std::string& ip, int port, const std::string& prefix, const std::string& db, const std::string& table, const std::vector<std::string>& columns)*/
-/*     : sqlite3_vtab(), c(ip, port), key_base(prefix + "." + db + "." + table), columns(columns)*/
-/*    {*/
-/*    }*/
-/*    */
-/*    sqlite3_int64 generate_id()*/
-/*    {*/
-/*        using namespace hiredis::commands;*/
-/*        return string::incr(c, key("rowid"));*/
-/*    }*/
-/*    */
-/*    std::string key(sqlite3_int64 row_id) const*/
-/*    {*/
-/*        return key_base + "." + std::to_string(row_id);*/
-/*    }*/
-/*    std::string key(const std::string& name) const*/
-/*    {*/
-/*        return key_base + "." + name;*/
-/*    }*/
 /*};*/
 
 /*struct cursor : sqlite3_vtab_cursor*/
@@ -174,98 +148,6 @@ any iteration needs to lookup in the set.
 /*    }*/
 /*};*/
 
-/*int redisConnect(sqlite3 *db, void *, int argc, const char *const* argv, sqlite3_vtab **ppVtab, char **pzErr)*/
-/*{*/
-/*    if(argc < 4)*/
-/*    {*/
-/*        *pzErr = sqlite3_mprintf("Redis address missing.");*/
-/*        return SQLITE_ERROR;*/
-/*    }*/
-
-/*    try*/
-/*    {*/
-/*        std::string database_name = argv[1];*/
-/*        std::string table_name = argv[2];*/
-/*        std::string redis_address = argv[3];*/
-/*        std::string prefix = argv[4];*/
-/*        std::vector<std::string> column_def{argv+5, argv+argc};*/
-/*        std::vector<std::string> columns = column_def;*/
-
-/*        if(column_def.empty())*/
-/*        {*/
-/*            *pzErr = sqlite3_mprintf("Table with zero columns");*/
-/*            return SQLITE_ERROR;*/
-/*        }*/
-
-/*        std::string ip = redis_address;*/
-/*        int port = 6379;*/
-/*        auto pos = redis_address.find(':');*/
-/*        if(pos != std::string::npos)*/
-/*        {*/
-/*            ip = redis_address.substr(0, pos);*/
-/*            port = atoi(redis_address.substr(pos+1, std::string::npos).c_str());*/
-/*        }*/
-
-/*        try*/
-/*        {*/
-/*            auto vtable = new vtab(ip, port, prefix, database_name, table_name, columns);*/
-/*            *ppVtab = vtable;*/
-/*    */
-/*            std::stringstream s;*/
-/*            s << "CREATE TABLE xxxx(";*/
-/*            for(auto it = begin(column_def); it != end(column_def);)*/
-/*            {*/
-/*                s << *it;*/
-/*                ++it;*/
-/*                if(it != end(column_def))*/
-/*                    s << ", ";*/
-/*            }*/
-/*            s << ")";*/
-/*    */
-/*            sqlite3_declare_vtab(db, s.str().c_str());*/
-/*        }*/
-/*        catch(const hiredis::context::error& ex)*/
-/*        {*/
-/*            *pzErr = sqlite3_mprintf(ex.what());*/
-/*            return SQLITE_ERROR;*/
-/*        }*/
-/*    }*/
-/*    catch(const std::bad_alloc& ex)*/
-/*    {*/
-/*        return SQLITE_NOMEM;*/
-/*    }*/
-/*    */
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisDisconnect(sqlite3_vtab *pVtab)*/
-/*{*/
-/*    auto vtable = static_cast<vtab*>(pVtab);*/
-/*    delete vtable;*/
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor)*/
-/*{*/
-/*    auto vtable = static_cast<vtab*>(p);*/
-/*    */
-/*    try*/
-/*    {*/
-/*        auto pCur = new cursor(*vtable);*/
-/*        *ppCursor = pCur;*/
-/*    }*/
-/*    catch(const std::bad_alloc& ex)*/
-/*    {*/
-/*        return SQLITE_NOMEM;*/
-/*    }*/
-/*    return SQLITE_OK;*/
-/*}*/
-/*int redisClose(sqlite3_vtab_cursor *cur)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    delete pCur;*/
-/*    return SQLITE_OK;*/
-/*}*/
 /*int redisNext(sqlite3_vtab_cursor *cur)*/
 /*{*/
 /*    auto pCur = static_cast<cursor*>(cur);*/
@@ -309,12 +191,6 @@ any iteration needs to lookup in the set.
 /*{*/
 /*    auto pCur = static_cast<cursor*>(cur);*/
 /*    pCur->filter(TODO);*/
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisBestIndex(sqlite3_vtab *, sqlite3_index_info *)*/
-/*{*/
-/*    // TODO*/
 /*    return SQLITE_OK;*/
 /*}*/
 
@@ -463,6 +339,7 @@ typedef struct redis_vtbl_vtab {
     redis_vtbl_connection conn_spec;
     redisContext *c;
     char *key_base;
+    char *rowid_key;
     list_t columns;
 } redis_vtbl_vtab;
 
@@ -496,15 +373,37 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
         return SQLITE_NOMEM;
     }
     
+    vtab->rowid_key = strdup(vtab->key_base);
+    if(!vtab->rowid_key) {
+        free(vtab->key_base);
+        redis_vtbl_connection_free(&vtab->conn_spec);
+        return SQLITE_NOMEM;
+    }
+    string_append(&vtab->rowid_key, ".");
+    string_append(&vtab->rowid_key, "rowid");
+    
     list_init(&vtab->columns, free);
+    /* todo push the column names onto the columns list */
     
     return SQLITE_OK;
+}
+
+static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *rowid) {
+    int err;
+    int64_t old;
+    
+    err = redis_incr(vtab->c, vtab->rowid_key, &old);
+    if(err) return err;
+    
+    *rowid = old;
+    return 0;
 }
 
 static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     redis_vtbl_connection_free(&vtab->conn_spec);
     if(vtab->c) redisFree(vtab->c);
     free(vtab->key_base);
+    free(vtab->rowid_key);
     list_free(&vtab->columns);
 }
 
@@ -538,10 +437,12 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     const char *conn_config = argv[3];
     const char *prefix = argv[4];
     
-    // init vtable structute.
     vtab = malloc(sizeof(redis_vtbl_vtab));
     if(!vtab) return SQLITE_NOMEM;
     
+    /* Initialises structure parameters
+     * Parses and validates configuration
+     * returns an sqlite error code on failure */
     err = redis_vtbl_vtab_init(vtab, conn_config, db_name, table, prefix, pzErr);
     if(err) {
         free(vtab);
@@ -581,7 +482,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
     
-    // only declare the table if redis connection is established.
+    /* Create table definition and pass to sqlite */
     char* s = 0;
     string_append(&s, "CREATE TABLE xxxx(");
     for(n = 0; n < column.size; ) {
@@ -600,18 +501,23 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     *ppVTab = (sqlite3_vtab*)vtab;
     return SQLITE_OK;
 }
+
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {
     return redis_vtbl_create(db, pAux, argc, argv, ppVTab, pzErr);
 }
+
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
-    return SQLITE_ERROR;
+    return SQLITE_OK;
 }
+
 static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv, sqlite3_int64 *pRowid) {
     return SQLITE_ERROR;
 }
+
 static int redis_vtbl_disconnect(sqlite3_vtab *pVTab) {
     return redis_vtbl_destroy(pVTab);
 }
+
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
     redis_vtbl_vtab *vtab;
     
@@ -626,34 +532,78 @@ static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
  * Redis backed Virtual table cursor
  *----------------------------------------------------------------------------*/
 
-struct redis_vtbl_cursor {
+typedef struct redis_vtbl_cursor {
     sqlite3_vtab_cursor base;
+    redis_vtbl_vtab *vtab;
     
-    unsigned int rows;
-    sqlite3_int64* row;
-    sqlite3_int64* current_row;
+    vector_t rows;
+    sqlite3_int64 *current_row;
     
     list_t columns;
-};
+} redis_vtbl_cursor;
+
+static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab) {
+    memset(&cur->base, 0, sizeof(sqlite3_vtab_cursor));
+    cur->vtab = vtab;
+    vector_init(&cur->rows, sizeof(int64_t), 0);
+    cur->current_row = 0;
+    
+    list_init(&cur->columns, free);
+    
+    return SQLITE_OK;
+}
+
+static void redis_vtbl_cursor_free(redis_vtbl_cursor *cur) {
+    vector_free(&cur->rows);
+    list_free(&cur->columns);
+}
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor) {
-    return SQLITE_ERROR;
+    int err;
+    redis_vtbl_vtab *vtab;
+    redis_vtbl_cursor *cursor;
+
+    vtab = (redis_vtbl_vtab*)pVTab;
+
+    cursor = malloc(sizeof(redis_vtbl_cursor));
+    if(!cursor) return SQLITE_NOMEM;
+    
+    err = redis_vtbl_cursor_init(cursor, vtab);
+    if(err) {
+        free(cursor);
+        return err;
+    }
+    
+    *ppCursor = (sqlite3_vtab_cursor*)cursor;
+    return SQLITE_OK;
 }
+
 static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor) {
-    return SQLITE_ERROR;
+    redis_vtbl_cursor *cursor;
+    
+    cursor = (redis_vtbl_cursor*)pCursor;
+    redis_vtbl_cursor_free(cursor);
+    free(cursor);
+    
+    return SQLITE_OK;
 }
+
 static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr, int argc, sqlite3_value **argv) {
     return SQLITE_ERROR;
 }
+
 static int redis_vtbl_cursor_next(sqlite3_vtab_cursor *pCursor) {
     return SQLITE_ERROR;
 }
+
 static int redis_vtbl_cursor_eof(sqlite3_vtab_cursor *pCursor) {
     return SQLITE_ERROR;
 }
+
 static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_context *ctx, int N) {
     return SQLITE_ERROR;
 }
+
 static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *pRowid) {
     return SQLITE_ERROR;
 }
