@@ -150,7 +150,7 @@ static int redisSentinelRefreshSentinelList(redisContext *cs, const char *servic
                 err = address_parse(&sentinel, reply->str, DEFAULT_REDIS_PORT);
                 if(err) continue;
                 
-                exists = vector_find(sentinels, &sentinel, (int (*)(void *, void *))address_cmp);
+                exists = vector_find(sentinels, &sentinel, (int (*)(const void *, const void *))address_cmp);
                 
                 if(!exists) vector_push(sentinels, &sentinel);
             }
