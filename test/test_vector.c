@@ -4,6 +4,12 @@
 #include <stdlib.h>
 #include <assert.h>
 
+static int int_cmp(const int *l, const int *r) {
+    if(*l < *r)  return -1;
+    if(*l > *r)  return 1;
+    /* == */     return 0;
+}
+
 void int_test()
 {
     int n;
@@ -16,6 +22,12 @@ void int_test()
         printf("push: %d\n", n);
         vector_push(&v, &n);
     }
+    
+    vector_sort(&v, (int (*)(const void *, const void *))int_cmp);
+    int search = 50;
+    int *fifty = vector_bsearch(&v, &search, (int (*)(const void *, const void *))int_cmp);
+    assert(fifty);
+    printf("fifty: %d\n", *fifty);
     
     for(it = vector_begin(&v); it != vector_end(&v); ++it) {
         printf("%d ", *it);
