@@ -77,7 +77,7 @@ int list_strtok(list_t *list, const char *text, const char *delim) {
     buffer = strdup(text);
     if(!buffer) {
         list_free(list);
-        return 1;
+        return LIST_ENOMEM;
     }
     
     token = strtok_r(buffer, delim, &state);
@@ -86,7 +86,7 @@ int list_strtok(list_t *list, const char *text, const char *delim) {
         if(!str) {
             free(buffer);
             list_free(list);
-            return 1;
+            return LIST_ENOMEM;
         }
         
         list_push(list, str);
@@ -94,6 +94,6 @@ int list_strtok(list_t *list, const char *text, const char *delim) {
     }
     
     free(buffer);
-    return 0;
+    return LIST_OK;
 }
 
