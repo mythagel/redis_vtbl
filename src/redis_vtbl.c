@@ -334,6 +334,26 @@ static int string_append(char** str, const char* src) {
     return 0;
 }
 
+const char* trim_ws(const char *str) {
+    while(*str && isspace(*str))
+        ++str;
+    return str;
+}
+
+/* parse the column name out of an sql definition */
+static int parse_column_name(const char *column_def, char **column_name) {
+    size_t len;
+    
+    column_def = trim_ws(column_def);
+    if(!*column_def) return 1;
+    
+    len = strcspn(column_def, " \t\n");
+    *column_name = strndup(column_def, len);
+    
+    if(!*column_name) return 1;
+    return 0;
+}
+
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
     
@@ -424,6 +444,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     size_t n;
     int err;
     list_t column;
+    char* column_name;
     redis_vtbl_vtab *vtab;
     
     if(argc < 6) {
@@ -488,6 +509,18 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
     
+    /* fill column names (todo and types) */
+    for(n = 0; n < column.size; ++n) {
+        err = parse_column_name(list_get(&column, n), &column_name);
+        if(err) {
+            redis_vtbl_vtab_free(vtab);
+            free(vtab);
+            return SQLITE_ERROR;
+        }
+        
+        list_push(&vtab->columns, column_name);
+    }
+    
     /* Create table definition and pass to sqlite */
     char* s = 0;
     string_append(&s, "CREATE TABLE xxxx(");
@@ -506,7 +539,6 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     list_free(&column);
     
     /* todo: retrieve indices from redis */
-    /* todo: fill column names and types */
     
     *ppVTab = (sqlite3_vtab*)vtab;
     return SQLITE_OK;
@@ -524,9 +556,9 @@ static int redis_vtbl_findfunction(sqlite3_vtab *pVtab, int nArg, const char *zN
     redis_vtbl_vtab *vtab;
     
     vtab = (redis_vtbl_vtab*)pVtab;
-    if(nArg == 2 && !strcmp(zName, "redis_create_index")) {
+    if(nArg == 1 && !strcmp(zName, "redis_create_index")) {
         *pxFunc = redis_vtbl_func_createindex;
-        *ppArg = vtab;
+        *ppArg = vtab;          /* may need to pass some extra data through the context. */
         return 1;
     }
     
@@ -554,11 +586,16 @@ static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
  * Utility function to define indexes
  *----------------------------------------------------------------------------*/
 
-/* tablename columnname*/
+/* column name */
 static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     redis_vtbl_vtab *vtab;
     
     vtab = sqlite3_user_data(ctx);
+    
+    /* todo create the index 
+     * Seems it may be necessary to pass some data through the context. */
+    
+    sqlite3_result_int(ctx, 1);
 }
 
 /*-----------------------------------------------------------------------------
@@ -672,7 +709,7 @@ int sqlite3_redisvtbl_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routi
     if(rc != SQLITE_OK)
         return rc;
     
-    rc = sqlite3_overload_function(db, "redis_create_index", 2);
+    rc = sqlite3_overload_function(db, "redis_create_index", 1);
     return rc;
 }
 
