@@ -72,12 +72,6 @@ any iteration needs to lookup in the set.
 /*    std::set<sqlite3_int64> rows;*/
 /*    std::set<sqlite3_int64>::const_iterator row_it;*/
 /*    std::map<std::string, std::string> record;*/
-/*    */
-/*    cursor(vtab& vtable)*/
-/*     : sqlite3_vtab_cursor(), vtable(vtable), row_it(rows.end())*/
-/*    {*/
-/*    }*/
-/*    */
 /*    void get()*/
 /*    {*/
 /*        using namespace hiredis::commands;*/
@@ -104,8 +98,6 @@ any iteration needs to lookup in the set.
 /*    {*/
 /*        using namespace hiredis::commands;*/
 /*        */
-/*        try*/
-/*        {*/
 /*            // could retrieve a subset of key ids based on filters...*/
 /*            auto key_ids = set::members(vtable.c, vtable.key("rows"));*/
 /*            */
@@ -117,17 +109,6 @@ any iteration needs to lookup in the set.
 /*            */
 /*            if(!eof())*/
 /*                get();*/
-/*        }*/
-/*        catch(const hiredis::error& ex)*/
-/*        {*/
-/*            // TODO*/
-/*            return false;*/
-/*        }*/
-/*        catch(const hiredis::context::error& ex)*/
-/*        {*/
-/*            // not recoverable.*/
-/*            return false;*/
-/*        }*/
 /*        return true;*/
 /*    }*/
 /*    */
@@ -354,6 +335,12 @@ static int parse_column_name(const char *column_def, char **column_name) {
     return 0;
 }
 
+enum {
+    CURSOR_INDEX_LINEAR,
+    CURSOR_INDEX_ROWID,
+    CURSOR_INDEX_NAMED
+};
+
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
     
@@ -548,7 +535,30 @@ static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *con
     return redis_vtbl_create(db, pAux, argc, argv, ppVTab, pzErr);
 }
 
+static int eq_rowid_p(const struct sqlite3_index_constraint *constraint) {
+    return constraint->op == SQLITE_INDEX_CONSTRAINT_EQ && constraint->iColumn == -1;
+}
+
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
+    redis_vtbl_vtab *vtab;
+    int i;
+    
+    vtab = (redis_vtbl_vtab*)pVTab;
+    
+    pIndexInfo->idxNum = CURSOR_INDEX_LINEAR;
+    pIndexInfo->estimatedCost = 1000.0;         /* todo retrieve row estimate from redis on connect. */
+    
+    for( i = 0; i < pIndexInfo->nConstraint; ++i) {
+        struct sqlite3_index_constraint *constraint = &pIndexInfo->aConstraint[i];
+        if(!constraint->usable) continue;
+        
+        if(eq_rowid_p(constraint)) {
+            pIndexInfo->idxNum = CURSOR_INDEX_ROWID;
+            pIndexInfo->estimatedCost = 1.0;
+        }
+        
+    }
+    
     return SQLITE_OK;
 }
 
