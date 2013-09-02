@@ -55,7 +55,7 @@ int main() {
 
     /* test0 - sqlite table */
     snprintf(buf, sizeof(buf), 
-        "CREATE TABLE test0 (\n"
+        "CREATE TABLE IF NOT EXISTS test0 (\n"
         "   blah          VARCHAR(255),\n"
         "   blah2          INTEGER,\n"
         "   blah3     VARCHAR(6)\n"
@@ -70,6 +70,8 @@ int main() {
         "   blah3     VARCHAR(6)\n"
         ");\n");
     if(exec(db, buf)) goto error;
+
+    exec(db, "select redis_create_index(blah) from test1");
 
     snprintf(buf, sizeof(buf), 
         "insert into test0 "
@@ -89,15 +91,17 @@ int main() {
     exec(db, "select * from test1");
 
     exec(db, "DELETE from test0");
-    exec(db, "DROP TABLE test0");
-
     exec(db, "DELETE from test1");
-    exec(db, "DROP TABLE test1");
 
+// cleanup
+    exec(db, "DROP TABLE test0");
+    exec(db, "DROP TABLE test1");
     sqlite3_close(db);
     sqlite3_shutdown();
     return 0;
 error:
+    exec(db, "DROP TABLE test0");
+    exec(db, "DROP TABLE test1");
     sqlite3_close(db);
     sqlite3_shutdown();
     return 1;
