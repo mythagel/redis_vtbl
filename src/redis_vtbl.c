@@ -295,6 +295,7 @@ any iteration needs to lookup in the set.
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table.[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
+ * prefix.db.table.indices      = master index (set) of indices on the table
  * prefix.db.table.index.rowid  = master index (set) of rows in the table
  * prefix.db.table.index.x      = additional set(rowid) index(s) for column x*/
 
@@ -305,6 +306,8 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
 static int redis_vtbl_disconnect(sqlite3_vtab *pVTab);
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab);
 
+static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv);
+
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor);
 static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor);
 static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr, int argc, sqlite3_value **argv);
@@ -312,8 +315,6 @@ static int redis_vtbl_cursor_next(sqlite3_vtab_cursor *pCursor);
 static int redis_vtbl_cursor_eof(sqlite3_vtab_cursor *pCursor);
 static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_context *ctx, int N);
 static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *pRowid);
-
-static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv);
 
 
 /*-----------------------------------------------------------------------------
@@ -341,6 +342,7 @@ typedef struct redis_vtbl_vtab {
     char *key_base;
     char *rowid_key;
     list_t columns;
+    vector_t index;
 } redis_vtbl_vtab;
 
 static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix, char **pzErr) {
@@ -385,6 +387,9 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     list_init(&vtab->columns, free);
     /* todo push the column names onto the columns list */
     
+    vector_init(&vtab->index, sizeof(char*), free);
+    /* todo retrieve indices from redis */
+    
     return SQLITE_OK;
 }
 
@@ -405,6 +410,7 @@ static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     free(vtab->key_base);
     free(vtab->rowid_key);
     list_free(&vtab->columns);
+    vector_free(&vtab->index);
 }
 
 /* argv[1]    - database name
@@ -498,6 +504,10 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     free(s);
     
     list_free(&column);
+    
+    /* todo: retrieve indices from redis */
+    /* todo: fill column names and types */
+    
     *ppVTab = (sqlite3_vtab*)vtab;
     return SQLITE_OK;
 }
@@ -508,6 +518,19 @@ static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *con
 
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
     return SQLITE_OK;
+}
+
+static int redis_vtbl_findfunction(sqlite3_vtab *pVtab, int nArg, const char *zName, void (**pxFunc)(sqlite3_context*,int,sqlite3_value**), void **ppArg) {
+    redis_vtbl_vtab *vtab;
+    
+    vtab = (redis_vtbl_vtab*)pVtab;
+    if(nArg == 2 && !strcmp(zName, "redis_create_index")) {
+        *pxFunc = redis_vtbl_func_createindex;
+        *ppArg = vtab;
+        return 1;
+    }
+    
+    return 0;
 }
 
 static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv, sqlite3_int64 *pRowid) {
@@ -527,6 +550,16 @@ static int redis_vtbl_destroy(sqlite3_vtab *pVTab) {
     return SQLITE_OK;
 }
 
+/*-----------------------------------------------------------------------------
+ * Utility function to define indexes
+ *----------------------------------------------------------------------------*/
+
+/* tablename columnname*/
+static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    redis_vtbl_vtab *vtab;
+    
+    vtab = sqlite3_user_data(ctx);
+}
 
 /*-----------------------------------------------------------------------------
  * Redis backed Virtual table cursor
@@ -608,16 +641,6 @@ static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *
     return SQLITE_ERROR;
 }
 
-
-/*-----------------------------------------------------------------------------
- * Utility function to define indexes
- *----------------------------------------------------------------------------*/
-
-static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
-
-}
-
-
 /*-----------------------------------------------------------------------------
  * sqlite3 extension machinery
  *----------------------------------------------------------------------------*/
@@ -625,20 +648,21 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
 static const sqlite3_module redis_vtbl_Module = {
     .iVersion     = 1,
     
-    .xCreate      = redis_vtbl_create,
-    .xConnect     = redis_vtbl_connect,
-    .xBestIndex   = redis_vtbl_bestindex,
-    .xUpdate      = redis_vtbl_update,
-    .xDisconnect  = redis_vtbl_disconnect,
-    .xDestroy     = redis_vtbl_destroy,
+    .xCreate       = redis_vtbl_create,
+    .xConnect      = redis_vtbl_connect,
+    .xBestIndex    = redis_vtbl_bestindex,
+    .xFindFunction = redis_vtbl_findfunction,
+    .xUpdate       = redis_vtbl_update,
+    .xDisconnect   = redis_vtbl_disconnect,
+    .xDestroy      = redis_vtbl_destroy,
     
-    .xOpen        = redis_vtbl_cursor_open,
-    .xClose       = redis_vtbl_cursor_close,
-    .xFilter      = redis_vtbl_cursor_filter,
-    .xNext        = redis_vtbl_cursor_next,
-    .xEof         = redis_vtbl_cursor_eof,
-    .xColumn      = redis_vtbl_cursor_column,
-    .xRowid       = redis_vtbl_cursor_rowid
+    .xOpen         = redis_vtbl_cursor_open,
+    .xClose        = redis_vtbl_cursor_close,
+    .xFilter       = redis_vtbl_cursor_filter,
+    .xNext         = redis_vtbl_cursor_next,
+    .xEof          = redis_vtbl_cursor_eof,
+    .xColumn       = redis_vtbl_cursor_column,
+    .xRowid        = redis_vtbl_cursor_rowid
 };
 
 int sqlite3_redisvtbl_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
@@ -648,7 +672,7 @@ int sqlite3_redisvtbl_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routi
     if(rc != SQLITE_OK)
         return rc;
     
-    rc = sqlite3_create_function(db, "redis_create_index", 2, SQLITE_ANY, 0, redis_vtbl_func_createindex, 0, 0);
+    rc = sqlite3_overload_function(db, "redis_create_index", 2);
     return rc;
 }
 
