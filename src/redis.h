@@ -15,6 +15,9 @@
  * Redis helpers
  *----------------------------------------------------------------------------*/
 
+/* vector must already be inited for int64_t members */
 int redis_reply_numeric_array(vector_t *vector, redisReply *reply);
+
+int redis_incr(redisContext *c, const char *key, int64_t *old);
 
 #endif /* REDIS_H_ */

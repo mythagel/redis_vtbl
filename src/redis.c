@@ -21,7 +21,6 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
     if(reply->type != REDIS_REPLY_ARRAY)
         return 1;
     
-    vector_init(vector, sizeof(int64_t), 0);
     vector_reserve(vector, reply->elements);
     for(i = 0; i < reply->elements; ++i) {
         if(reply->type == REDIS_REPLY_STRING) {
@@ -39,3 +38,18 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
     }
     return 0;
 }
+
+int redis_incr(redisContext *c, const char *key, int64_t *old) {
+    redisReply *reply;
+    
+    reply = redisCommand(c, "INCR %s", key);
+    if(!reply) return 1;
+    if(reply->type != REDIS_REPLY_INTEGER) {
+        freeReplyObject(reply);
+        return 1;
+    }
+    *old = reply->integer;
+    freeReplyObject(reply);
+    return 0;
+}
+
