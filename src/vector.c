@@ -46,6 +46,10 @@ void* vector_end(vector_t *vector) {
     return vector->data + (vector->elem_size * vector->size);
 }
 
+void vector_sort(vector_t *vector, int (*cmp)(const void *l, const void *r)) {
+    qsort(vector->data, vector->size, vector->elem_size, cmp);
+}
+
 int vector_push(vector_t *vector, void *value) {
     void *element;
     
@@ -63,7 +67,7 @@ int vector_push(vector_t *vector, void *value) {
     return VECTOR_OK;
 }
 
-void* vector_find(vector_t *vector, void *value, int (*cmp)(void *l, void *r)) {
+void* vector_find(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r)) {
     size_t index;
     for(index = 0; index < vector->size; ++index) {
         void *lvalue = vector_get(vector, index);
@@ -71,6 +75,10 @@ void* vector_find(vector_t *vector, void *value, int (*cmp)(void *l, void *r)) {
             return lvalue;
     }
     return 0;
+}
+
+void* vector_bsearch(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r)) {
+    return bsearch(value, vector->data, vector->size, vector->elem_size, cmp);
 }
 
 void vector_free(vector_t *vector) {

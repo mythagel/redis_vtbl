@@ -31,8 +31,11 @@ int   vector_reserve(vector_t *vector, size_t count);
 void* vector_get(vector_t *vector, size_t index);
 void* vector_begin(vector_t *vector);
 void* vector_end(vector_t *vector);
+void  vector_sort(vector_t *vector, int (*cmp)(const void *l, const void *r));
 int   vector_push(vector_t *vector, void *value);
-void* vector_find(vector_t *vector, void *value, int (*cmp)(void *l, void *r));
+void* vector_find(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r));
+/* bsearch precondition: vector is sorted */
+void* vector_bsearch(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r));
 void  vector_free(vector_t *vector);
 
 #endif /* VECTOR_H_ */
