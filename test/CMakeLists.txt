@@ -24,3 +24,13 @@ REGISTER_TEST(test_list)
 ADD_EXECUTABLE(test_address EXCLUDE_FROM_ALL test_address.c ${PROJECT_SOURCE_DIR}/src/address.c)
 TARGET_LINK_LIBRARIES(test_address m)
 REGISTER_TEST(test_address)
+
+ADD_EXECUTABLE(test_connection EXCLUDE_FROM_ALL 
+test_connection.c 
+${PROJECT_SOURCE_DIR}/src/connection.c 
+${PROJECT_SOURCE_DIR}/src/list.c 
+${PROJECT_SOURCE_DIR}/src/vector.c 
+${PROJECT_SOURCE_DIR}/src/address.c 
+${PROJECT_SOURCE_DIR}/src/sentinel.c)
+TARGET_LINK_LIBRARIES(test_connection m hiredis)
+REGISTER_TEST(test_connection)

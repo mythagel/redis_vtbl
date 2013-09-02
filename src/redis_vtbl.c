@@ -5,6 +5,7 @@ SQLITE_EXTENSION_INIT1
 #include "vector.h"
 #include "address.h"
 #include "sentinel.h"
+#include "connection.h"
 
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
@@ -415,105 +416,6 @@ any iteration needs to lookup in the set.
 /*    return SQLITE_OK;*/
 /*}*/
 
-enum {
-    CONNECTION_OK,
-    CONNECTION_BAD_FORMAT
-};
-
-typedef struct redis_vtbl_connection {
-    char *service;              /* sentinel service name; optional */
-    vector_t addresses;             /* list of redis/sentinel addresses */
-} redis_vtbl_connection;
-
-/* Initialise a new connection object from the given configuration.
- *
- * address[:port]
- * A connection to a single redis instance
- *
- * sentinel service-name address[:port][ address[:port]...]
- * A connection to the redis sentinel service at the given addresses. */
-static int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) {
-    
-    while(config && isspace(*config))
-        ++config;
-
-    if(!config)
-        return CONNECTION_BAD_FORMAT;
-    
-    conn->service = 0;
-    
-    /* Validate format:
-     * sentinel service-name address[:port][; address[:port]...] */
-    if(!strncmp(config, "sentinel ", /* strlen("sentinel ") */9)) {
-        int err;
-        size_t i;
-        list_t tok_list;
-        
-        err = list_strtok(&tok_list, config, " \t\n");
-        if(err) return CONNECTION_BAD_FORMAT;
-
-        if(tok_list.size < 3) {
-            list_free(&tok_list);
-            return CONNECTION_BAD_FORMAT;
-        }
-
-        if(strcmp(list_get(&tok_list, 0), "sentinel")) {
-            list_free(&tok_list);
-            return CONNECTION_BAD_FORMAT;
-        }
-
-        conn->service = list_set(&tok_list, 1, 0);
-        vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
-
-        for(i = 2; i < tok_list.size; ++i) {
-            address_t address;
-            
-            err = address_parse(&address, list_get(&tok_list, i), DEFAULT_SENTINEL_PORT);
-            if(err) {
-                list_free(&tok_list);
-                free(conn->service);
-                vector_free(&conn->addresses);
-                return CONNECTION_BAD_FORMAT;
-            }
-            vector_push(&conn->addresses, &address);
-        }
-        list_free(&tok_list);
-        
-    } else {
-        int err;
-        address_t address;
-        
-        err = address_parse(&address, config, DEFAULT_REDIS_PORT);
-        if(err)
-            return err;
-        
-        vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
-        vector_push(&conn->addresses, &address);
-    }
-    return CONNECTION_OK;
-}
-
-static int redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c) {
-    int err;
-    
-    if(conn->service) {     /* sentinel */
-        err = redisSentinelConnect(&conn->addresses, conn->service, c);
-        return err;
-    
-    } else {                /* redis */
-        address_t* redis;
-        
-        redis = vector_get(&conn->addresses, 0);
-        *c = redisConnect(redis->host, redis->port);
-        return *c ? 0 : 1;
-    }
-}
-
-static void redis_vtbl_connection_free(redis_vtbl_connection *conn) {
-    free(conn->service);
-    vector_free(&conn->addresses);
-}
-
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table.[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
@@ -564,13 +466,21 @@ typedef struct redis_vtbl_vtab {
     list_t columns;
 } redis_vtbl_vtab;
 
-static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix) {
+static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix, char **pzErr) {
     int err;
     
     memset(&vtab->base, 0, sizeof(sqlite3_vtab));
     
     err = redis_vtbl_connection_init(&vtab->conn_spec, conn_config);
-    if(err) return err;
+    if(err) {
+        switch(err) {
+            case CONNECTION_BAD_FORMAT:
+                *pzErr = sqlite3_mprintf("Bad format; Expected ip[:port] | sentinel service ip[:port] [ip[:port]...], key_prefix, column_def0, ...column_defN");
+                return SQLITE_ERROR;
+            case CONNECTION_ENOMEM:
+                return SQLITE_NOMEM;
+        }
+    }
     
     vtab->c = 0;
     vtab->key_base = 0;
@@ -583,17 +493,17 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     
     if(!vtab->key_base) {
         redis_vtbl_connection_free(&vtab->conn_spec);
-        return 1;   /* todo normalise error reporting. */
+        return SQLITE_NOMEM;
     }
     
     list_init(&vtab->columns, free);
     
-    return 0;
+    return SQLITE_OK;
 }
 
 static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     redis_vtbl_connection_free(&vtab->conn_spec);
-    redisFree(vtab->c);
+    if(vtab->c) redisFree(vtab->c);
     free(vtab->key_base);
     list_free(&vtab->columns);
 }
@@ -612,7 +522,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     redis_vtbl_vtab *vtab;
     
     if(argc < 6) {
-        *pzErr = sqlite3_mprintf("Expected ip:port | sentinel service ip:port [ip:port...], prefix, column0, ...columnN");
+        *pzErr = sqlite3_mprintf("Bad format; Expected ip[:port] | sentinel service ip[:port] [ip[:port]...], key_prefix, column_def0, ...column_defN");
         return SQLITE_ERROR;
     }
 
@@ -632,15 +542,36 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     vtab = malloc(sizeof(redis_vtbl_vtab));
     if(!vtab) return SQLITE_NOMEM;
     
-    err = redis_vtbl_vtab_init(vtab, conn_config, db_name, table, prefix);
+    err = redis_vtbl_vtab_init(vtab, conn_config, db_name, table, prefix, pzErr);
     if(err) {
         free(vtab);
-        /* todo map error code and provide error string */
-        return SQLITE_ERROR;
+        return err;
     }
     
+    /* Attempt to connect to redis.
+     * Will either connect via sentinel
+     * or directly based on the configuration. */
     err = redis_vtbl_connection_connect(&vtab->conn_spec, &vtab->c);
     if(err) {
+        if(vtab->conn_spec.service) {
+            switch(err) {
+                case SENTINEL_ERROR:
+                    *pzErr = sqlite3_mprintf("Sentinel: Unknown error.");
+                    break;
+                case SENTINEL_MASTER_NAME_UNKNOWN:
+                    *pzErr = sqlite3_mprintf("Sentinel: Master name unknown");
+                    break;
+                case SENTINEL_MASTER_UNKNOWN:
+                    *pzErr = sqlite3_mprintf("Sentinel: Master Unknown");
+                    break;
+                case SENTINEL_UNREACHABLE:
+                    *pzErr = sqlite3_mprintf("Sentinel: Unreachable");
+                    break;
+            }
+        } else {
+            *pzErr = sqlite3_mprintf("Redis: %s", vtab->conn_spec.errstr);
+        }
+        
         redis_vtbl_vtab_free(vtab);
         free(vtab);
         return SQLITE_ERROR;
@@ -660,11 +591,13 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
             string_append(&s, ", ");
     }
     string_append(&s, ")");
+    if(!s) return SQLITE_NOMEM;
+    
     sqlite3_declare_vtab(db, s);
     free(s);
     
     list_free(&column);
-    *ppVTab = vtab;
+    *ppVTab = (sqlite3_vtab*)vtab;
     return SQLITE_OK;
 }
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr) {

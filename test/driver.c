@@ -60,7 +60,10 @@ int main() {
         "   blah2          INTEGER,\n"
         "   blah3     VARCHAR(6)\n"
         ");\n");
-    if(exec(db, buf)) exit(1);
+    if(exec(db, buf)) {
+        sqlite3_close(db);
+        return 1;
+    }
 
     /* test1 - sqlite redis backed table */
     snprintf(buf, sizeof(buf), 
@@ -69,21 +72,30 @@ int main() {
         "   blah2          INTEGER,\n"
         "   blah3     VARCHAR(6)\n"
         ");\n");
-    if(exec(db, buf)) exit(1);
+    if(exec(db, buf)) {
+        sqlite3_close(db);
+        return 1;
+    }
 
     snprintf(buf, sizeof(buf), 
         "insert into test0 "
         "(blah, blah2, blah3) "
         "values ('%s','%d', '%s')", 
         "42ea2b19af3a4678b1b71a335cf5a9ce", 1377670786, "1008");
-    if(exec(db, buf)) exit(1);
+    if(exec(db, buf)) {
+        sqlite3_close(db);
+        return 1;
+    }
 
     snprintf(buf, sizeof(buf), 
         "insert into test1 "
         "(blah, blah2, blah3) "
         "values ('%s','%d', '%s')", 
         "42ea2b19af3a4678b1b71a335cf5a9ce", 1377670786, "1008");
-    if(exec(db, buf)) exit(1);
+    if(exec(db, buf)) {
+        sqlite3_close(db);
+        return 1;
+    }
 
     exec(db, "select * from test0");
     exec(db, "select * from test1");
