@@ -81,6 +81,17 @@ void* vector_bsearch(vector_t *vector, const void *value, int (*cmp)(const void 
     return bsearch(value, vector->data, vector->size, vector->elem_size, cmp);
 }
 
+void vector_clear(vector_t *vector) {
+    if(vector->value_free) {
+        size_t i;
+        for(i = 0; i < vector->size; ++i) {
+            void* value = vector_get(vector, i);
+            vector->value_free(value);
+        }
+    }
+    vector->size = 0;
+}
+
 void vector_free(vector_t *vector) {
     if(vector->value_free) {
         size_t i;
