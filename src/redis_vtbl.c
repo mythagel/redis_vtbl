@@ -12,6 +12,8 @@ SQLITE_EXTENSION_INIT1
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
+#include <errno.h>
 
 /*
 
@@ -52,22 +54,6 @@ any iteration needs to lookup in the set.
 /*    std::set<sqlite3_int64> rows;*/
 /*    std::set<sqlite3_int64>::const_iterator row_it;*/
 /*    std::map<std::string, std::string> record;*/
-/*    void get()*/
-/*    {*/
-/*        using namespace hiredis::commands;*/
-/*        */
-/*        while(row_it != rows.end())*/
-/*        {*/
-/*            // Try to retrieve this record.*/
-/*            // If it has concurrently been removed, try*/
-/*            // the next records until one is found.*/
-/*            record = hash::get(vtable.c, vtable.key(*row_it));*/
-/*            if(!record.empty())*/
-/*                break;*/
-/*            */
-/*            ++row_it;*/
-/*        }*/
-/*    }*/
 /*    */
 /*    */
 /*    Retrieve row ids from redis.*/
@@ -91,69 +77,7 @@ any iteration needs to lookup in the set.
 /*                get();*/
 /*        return true;*/
 /*    }*/
-/*    */
-/*    void next()*/
-/*    {*/
-/*        ++row_it;*/
-/*        get();*/
-/*    }*/
-/*    */
-/*    sqlite3_int64 row_id() const*/
-/*    {*/
-/*        return *row_it;*/
-/*    }*/
-/*    */
-/*    bool eof() const*/
-/*    {*/
-/*        return row_it == rows.end();*/
-/*    }*/
 /*};*/
-
-/*int redisNext(sqlite3_vtab_cursor *cur)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    pCur->next();*/
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int i)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    auto& vtable = pCur->vtable;*/
-/*    */
-/*    if(static_cast<unsigned>(i) >= vtable.columns.size())*/
-/*        return SQLITE_ERROR;*/
-/*    */
-/*    auto key = vtable.columns[i];*/
-/*    auto it = pCur->record.find(key);*/
-/*    */
-/*    if(it != end(pCur->record))*/
-/*        sqlite3_result_text(ctx, it->second.c_str(), it->second.size(), SQLITE_TRANSIENT);*/
-/*    else*/
-/*        sqlite3_result_null(ctx);*/
-/*    */
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    *pRowid = pCur->row_id();*/
-/*    return SQLITE_OK;*/
-/*}*/
-
-/*int redisEof(sqlite3_vtab_cursor *cur)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    return pCur->eof();*/
-/*}*/
-
-/*int redisFilter(sqlite3_vtab_cursor *cur, int , const char *, int , sqlite3_value **)*/
-/*{*/
-/*    auto pCur = static_cast<cursor*>(cur);*/
-/*    pCur->filter(TODO);*/
-/*    return SQLITE_OK;*/
-/*}*/
 
 /*int redisUpdate(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv, sqlite_int64 *pRowid)*/
 /*{*/
@@ -285,7 +209,7 @@ static int redis_vtbl_destroy(sqlite3_vtab *pVTab);
 static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv);
 
 enum {
-    CURSOR_INDEX_LINEAR,
+    CURSOR_INDEX_SCAN,
     CURSOR_INDEX_ROWID,
     CURSOR_INDEX_NAMED
 };
@@ -297,7 +221,7 @@ typedef struct redis_vtbl_cursor {
     vector_t rows;
     sqlite3_int64 *current_row;
     
-    list_t columns;
+    vector_t column_data;
 } redis_vtbl_cursor;
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor);
@@ -326,6 +250,12 @@ static int string_append(char** str, const char* src) {
     return 0;
 }
 
+#define MAXI64STRLEN ((CHAR_BIT * sizeof(sqlite3_int64) - 1) / 3 + 2)
+static char* i64tos(sqlite3_int64 i) {
+    static char buf[MAXI64STRLEN];           /* not thread safe nor reentrant */
+    snprintf(buf, MAXI64STRLEN, "%lld", i);
+    return buf;
+}
 
 /*-----------------------------------------------------------------------------
  * Column definition
@@ -397,6 +327,11 @@ static void redis_vtbl_column_spec_free(redis_vtbl_column_spec *cspec) {
  * Redis backed Virtual table
  *----------------------------------------------------------------------------*/
 
+static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix, char **pzErr);
+static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab);
+static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *rowid);
+static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab);
+
 static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix, char **pzErr) {
     int err;
     
@@ -437,11 +372,29 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     string_append(&vtab->rowid_key, "rowid");
     
     vector_init(&vtab->columns, sizeof(redis_vtbl_column_spec), (void(*)(void*))redis_vtbl_column_spec_free);
-    
     vector_init(&vtab->index, sizeof(char*), free);
-    /* todo retrieve indices from redis */
     
     return SQLITE_OK;
+}
+
+static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
+    int err;
+    vector_t *index;
+    redisReply *reply;
+    
+    index = &vtab->index;
+    vector_clear(index);
+    
+    /* retrieve indices from redis */
+    reply = redisCommand(vtab->c, "SMEMBERS %s.indices", vtab->key_base);
+    if(!reply) return 1;
+    
+    err = redis_reply_string_array(index, reply);
+    freeReplyObject(reply);
+    if(err)  return 1;
+    
+    vector_sort(index, (int (*)(const void *, const void *))strcmp);
+    return 0;
 }
 
 static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *rowid) {
@@ -558,6 +511,17 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
         vector_push(&vtab->columns, &cspec);
     }
     
+    /* retrieve indices from redis */
+    err = redis_vtbl_vtab_update_indices(vtab);
+    if(err) {
+        *pzErr = sqlite3_mprintf("Unable to retrieve indices from redis");
+        
+        list_free(&column);
+        redis_vtbl_vtab_free(vtab);
+        free(vtab);
+        return SQLITE_ERROR;
+    }
+    
     /* Create table definition and pass to sqlite */
     char* s = 0;
     string_append(&s, "CREATE TABLE xxxx(");
@@ -574,8 +538,6 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     free(s);
     
     list_free(&column);
-    
-    /* todo: retrieve indices from redis */
     
     *ppVTab = (sqlite3_vtab*)vtab;
     return SQLITE_OK;
@@ -595,24 +557,25 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
     
     vtab = (redis_vtbl_vtab*)pVTab;
     
-    pIndexInfo->idxNum = CURSOR_INDEX_LINEAR;
+    pIndexInfo->idxNum = CURSOR_INDEX_SCAN;
     pIndexInfo->estimatedCost = 1000.0;         /* todo retrieve row estimate from redis on connect. */
     
     for(i = 0; i < pIndexInfo->nConstraint; ++i) {
-        redis_vtbl_column_spec *cspec;
-        const char *index_name;
         struct sqlite3_index_constraint *constraint = &pIndexInfo->aConstraint[i];
         if(!constraint->usable) continue;
         
         if(eq_rowid_p(constraint)) {
             pIndexInfo->idxNum = CURSOR_INDEX_ROWID;
             pIndexInfo->estimatedCost = 1.0;
+            pIndexInfo->aConstraintUsage[i].argvIndex = 1;
             break;
         }
         
         if(constraint->iColumn == -1) {
             // other constraints on the rowid
         } else {
+            redis_vtbl_column_spec *cspec;
+            const char *index_name;
         
             /* lookup the column by id
              * Determine if that column is indexed */
@@ -620,6 +583,9 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
             if(!cspec) return SQLITE_ERROR;
             
             index_name = vector_bsearch(&vtab->index, cspec->name, (int (*)(const void *, const void *))strcmp);
+            if(index_name) {
+                /* todo: tell sqlite to use this index */
+            }
             
             /*pIndexInfo->aConstraintUsage[x].argvIndex = ++cons_idx;*/
         }
@@ -680,18 +646,69 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
 
 static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab) {
     memset(&cur->base, 0, sizeof(sqlite3_vtab_cursor));
+
     cur->vtab = vtab;
+    
     vector_init(&cur->rows, sizeof(int64_t), 0);
     cur->current_row = 0;
     
-    list_init(&cur->columns, free);
+    vector_init(&cur->column_data, sizeof(char*), free);
     
     return SQLITE_OK;
 }
 
+/* retrieve column_data for current_row */
+static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
+    int err;
+    redis_vtbl_vtab *vtab;
+    vector_t args;
+    redisReply *reply;
+    char *str;
+    size_t i;
+
+    if(!cur->current_row)
+        return;
+    
+    vtab = cur->vtab;
+    vector_clear(&cur->column_data);
+
+    /* HMGET key_base.current_row column0 ...columnN */
+    vector_init(&args, sizeof(char*), free);
+    vector_reserve(&args, 2 + vtab->columns.size);
+    
+    vector_push(&args, strdup("HMGET"));
+    
+    string_append(&str, vtab->key_base);
+    string_append(&str, ".");
+    string_append(&str, i64tos(*cur->current_row));
+    if(!str) {
+        vector_free(&args);
+        return;
+    }
+    vector_push(&args, str);
+    
+    for(i = 0; i < vtab->columns.size; ++i) {
+        str = vector_get(&vtab->columns, i);
+        vector_push(&args, strdup(str));
+    }
+    
+    reply = redisCommandArgv(vtab->c, args.size, args.data, 0);
+    vector_free(&args);
+    if(!reply) return;
+    
+    /* note: This implementation differs from the prototype.
+     * In the original if a record was concurrently removed,
+     * the next record was automatically retrieved.
+     * This version will return a row full of null values.
+     * It is uncertain at this time which approach is better. */
+    err = redis_reply_string_array(&cur->column_data, reply);
+    freeReplyObject(reply);
+    if(err) return;
+}
+
 static void redis_vtbl_cursor_free(redis_vtbl_cursor *cur) {
     vector_free(&cur->rows);
-    list_free(&cur->columns);
+    vector_free(&cur->column_data);
 }
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor) {
@@ -724,24 +741,104 @@ static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor) {
     return SQLITE_OK;
 }
 
+/* use HMGET to retrieve key values.
+ * guarantees order of keys is well defined.
+*/
 static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr, int argc, sqlite3_value **argv) {
+    
+    switch(idxNum) {
+        case CURSOR_INDEX_SCAN: {
+            /* full table scan */
+            break;
+        }
+        case CURSOR_INDEX_ROWID: {
+            /* direct rowid lookup */
+            break;
+        }
+        case CURSOR_INDEX_NAMED: {
+            /* lookup by names index */
+            break;
+        }
+    }
     return SQLITE_ERROR;
 }
 
 static int redis_vtbl_cursor_next(sqlite3_vtab_cursor *pCursor) {
-    return SQLITE_ERROR;
+    int eof;
+    redis_vtbl_cursor *cursor;
+    cursor = (redis_vtbl_cursor*)pCursor;
+    
+    ++cursor->current_row;
+    eof = cursor->current_row == vector_end(&cursor->rows);
+    
+    if(!eof) {
+        redis_vtbl_cursor_get(cursor);
+    }
+    return SQLITE_OK;
 }
 
 static int redis_vtbl_cursor_eof(sqlite3_vtab_cursor *pCursor) {
-    return SQLITE_ERROR;
+    redis_vtbl_cursor *cursor;
+    cursor = (redis_vtbl_cursor*)pCursor;
+    
+    return cursor->current_row == vector_end(&cursor->rows);
 }
 
 static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_context *ctx, int N) {
-    return SQLITE_ERROR;
+    redis_vtbl_cursor *cursor;
+    redis_vtbl_vtab *vtab;
+    redis_vtbl_column_spec *cspec;
+    const char *value;
+    char *end;
+    sqlite3_int64 i;
+    double f;
+    
+    cursor = (redis_vtbl_cursor*)pCursor;
+    vtab = cursor->vtab;
+
+    cspec = vector_get(&vtab->columns, N);
+    if(!cspec) return SQLITE_ERROR;
+    
+    value = vector_get(&cursor->column_data, N);
+    
+    if(!value) {
+        sqlite3_result_null(ctx);
+        return SQLITE_OK;
+    }
+    
+    switch(cspec->data_type) {
+        case SQLITE_INTEGER:
+            errno = 0;
+            i = strtoll(value, &end, 10);
+            if(errno || *end)      /* out-of-range | rubbish characters */
+                break;
+            sqlite3_result_int64(ctx, i);
+            break;
+            
+        case SQLITE_TEXT:
+            sqlite3_result_text(ctx, value, -1, SQLITE_TRANSIENT);
+            break;
+            
+        case SQLITE_FLOAT:
+            errno = 0;
+            f = strtod(value, &end);
+            if(errno || *end)      /* out-of-range | rubbish characters */
+                break;
+            sqlite3_result_double(ctx, f);
+            break;
+    }
+    
+    return SQLITE_OK;
 }
 
 static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *pRowid) {
-    return SQLITE_ERROR;
+    redis_vtbl_cursor *cursor;
+    cursor = (redis_vtbl_cursor*)pCursor;
+    
+    if(!cursor->current_row) return SQLITE_ERROR;
+
+    *pRowid = *cursor->current_row;
+    return SQLITE_OK;
 }
 
 /*-----------------------------------------------------------------------------
@@ -771,6 +868,8 @@ static const sqlite3_module redis_vtbl_Module = {
 int sqlite3_redisvtbl_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     SQLITE_EXTENSION_INIT2(pApi);
     int rc;
+    (void)pzErrMsg; /* unused */
+    
     rc = sqlite3_create_module(db, "redis", &redis_vtbl_Module, 0);
     if(rc != SQLITE_OK)
         return rc;
