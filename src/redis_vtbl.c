@@ -15,104 +15,6 @@ SQLITE_EXTENSION_INIT1
 #include <limits.h>
 #include <errno.h>
 
-/*int redisUpdate(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv, sqlite_int64 *pRowid)*/
-/*{*/
-/*    auto vtable = static_cast<vtab*>(pVTab);*/
-/*    auto& c = vtable->c;*/
-/*    using namespace hiredis::commands;*/
-/*    */
-/*    if(argc == 1)*/
-/*    {*/
-/*        // DELETE*/
-/*        sqlite3_int64 row_id = sqlite3_value_int64(argv[0]);*/
-/*        */
-/*        try*/
-/*        {*/
-/*            // TODO pipeline.*/
-/*            key::del(c, vtable->key(row_id));*/
-/*            set::rem(c, vtable->key("rows"), std::to_string(row_id));*/
-/*        }*/
-/*        catch(const hiredis::error& ex)*/
-/*        {*/
-/*            return SQLITE_ERROR;*/
-/*        }*/
-/*    }*/
-/*    else if(argc > 1 && sqlite3_value_type(argv[0])==SQLITE_NULL)*/
-/*    {*/
-/*        // INSERT*/
-/*        try*/
-/*        {*/
-/*            sqlite3_int64 row_id = sqlite3_value_int64(argv[0]);*/
-/*            if(sqlite3_value_type(argv[1]) == SQLITE_NULL)*/
-/*                row_id = vtable->generate_id();*/
-/*            else*/
-/*                row_id = sqlite3_value_int64(argv[0]);*/
-/*        */
-/*            std::map<std::string, std::string> record;*/
-/*            int i = 0;*/
-/*            for(int vidx = 2; vidx < argc; ++i, ++vidx)*/
-/*            {*/
-/*                if(sqlite3_value_type(argv[vidx]) != SQLITE_NULL)*/
-/*                {*/
-/*                    std::string v = reinterpret_cast<const char*>(sqlite3_value_text(argv[vidx]));*/
-/*                    record.insert(std::make_pair(vtable->columns[i], v));*/
-/*                }*/
-/*            }*/
-/*            */
-/*            // TODO pipeline.*/
-/*            hash::set(c, vtable->key(row_id), record);*/
-/*            set::add(c, vtable->key("rows"), std::to_string(row_id));*/
-/*            *pRowid = row_id;*/
-/*        }*/
-/*        catch(const hiredis::error& ex)*/
-/*        {*/
-/*            return SQLITE_ERROR;*/
-/*        }*/
-/*    }*/
-/*    else if(argc > 1 && argv[0] && argv[0] == argv[1])*/
-/*    {*/
-/*        // UPDATE*/
-/*        try*/
-/*        {*/
-/*            sqlite3_int64 row_id = sqlite3_value_int64(argv[0]);*/
-/*        */
-/*            std::map<std::string, std::string> record;*/
-/*            int i = 0;*/
-/*            for(int vidx = 2; vidx < argc; ++i, ++vidx)*/
-/*            {*/
-/*                if(sqlite3_value_type(argv[vidx]) != SQLITE_NULL)*/
-/*                {*/
-/*                    std::string v = reinterpret_cast<const char*>(sqlite3_value_text(argv[vidx]));*/
-/*                    record.insert(std::make_pair(vtable->columns[i], v));*/
-/*                }*/
-/*            }*/
-/*            */
-/*            // TODO pipeline.*/
-/*            hash::set(c, vtable->key(row_id), record);*/
-/*            set::add(c, vtable->key("rows"), std::to_string(row_id));*/
-/*        }*/
-/*        catch(const hiredis::error& ex)*/
-/*        {*/
-/*            return SQLITE_ERROR;*/
-/*        }*/
-/*    }*/
-/*    else if(argc > 1 && argv[0] && argv[0] != argv[1])*/
-/*    {*/
-/*//        sqlite3_int64 old_row_id = sqlite3_value_int64(argv[0]);*/
-/*//        sqlite3_int64 row_id = sqlite3_value_int64(argv[1]);*/
-/*        */
-/*        // unhandled.*/
-/*        return SQLITE_ERROR;*/
-/*    }*/
-/*    else*/
-/*    {*/
-/*        // eh? unhandled.*/
-/*        return SQLITE_ERROR;*/
-/*    }*/
-
-/*    return SQLITE_OK;*/
-/*}*/
-
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table:[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
@@ -576,6 +478,121 @@ static int redis_vtbl_findfunction(sqlite3_vtab *pVtab, int nArg, const char *zN
 }
 
 static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv, sqlite3_int64 *pRowid) {
+    int err;
+    redis_vtbl_vtab *vtab;
+    sqlite3_int64 row_id;
+    
+    vtab = (redis_vtbl_vtab*)pVtab;
+    
+    if(argc == 1) {
+        row_id = sqlite3_value_int64(argv[0]);
+        /* delete */
+        /* MULTI */
+        /* erase object */
+        /* erase from rowids */
+        /* erase from indexes */
+        /* EXEC */
+        
+    } else if(sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        if(sqlite3_value_type(argv[1]) != SQLITE_NULL)
+            return SQLITE_ERROR;            /* attempt to specify manual rowid disallowed */
+        
+        err = redis_vtbl_vtab_generate_rowid(vtab, &row_id);
+        if(err) return SQLITE_ERROR;
+        
+        /* insert */
+        /* MULIT */
+        /* create object */
+        /* add to rowids */
+        /* add to indexes */
+        /* EXEC */
+        
+    } else if(argv[0] == argv[1]) {
+        row_id = sqlite3_value_int64(argv[0]);
+        /* update */
+        /* WATCH key */
+        /* MULIT */
+        /* update object */
+        /* update indexes */
+        /* EXEC */
+    } else {
+        /* attempt to update rowid disallowed */
+        return SQLITE_ERROR;
+    }
+/*    else if(argc > 1 && sqlite3_value_type(argv[0])==SQLITE_NULL)*/
+/*    {*/
+/*        // INSERT*/
+/*        try*/
+/*        {*/
+/*            sqlite3_int64 row_id = sqlite3_value_int64(argv[0]);*/
+/*            if(sqlite3_value_type(argv[1]) == SQLITE_NULL)*/
+/*                row_id = vtable->generate_id();*/
+/*            else*/
+/*                row_id = sqlite3_value_int64(argv[0]);*/
+/*        */
+/*            std::map<std::string, std::string> record;*/
+/*            int i = 0;*/
+/*            for(int vidx = 2; vidx < argc; ++i, ++vidx)*/
+/*            {*/
+/*                if(sqlite3_value_type(argv[vidx]) != SQLITE_NULL)*/
+/*                {*/
+/*                    std::string v = reinterpret_cast<const char*>(sqlite3_value_text(argv[vidx]));*/
+/*                    record.insert(std::make_pair(vtable->columns[i], v));*/
+/*                }*/
+/*            }*/
+/*            */
+/*            // TODO pipeline.*/
+/*            hash::set(c, vtable->key(row_id), record);*/
+/*            set::add(c, vtable->key("rows"), std::to_string(row_id));*/
+/*            *pRowid = row_id;*/
+/*        }*/
+/*        catch(const hiredis::error& ex)*/
+/*        {*/
+/*            return SQLITE_ERROR;*/
+/*        }*/
+/*    }*/
+/*    else if(argc > 1 && argv[0] && argv[0] == argv[1])*/
+/*    {*/
+/*        // UPDATE*/
+/*        try*/
+/*        {*/
+/*            sqlite3_int64 row_id = sqlite3_value_int64(argv[0]);*/
+/*        */
+/*            std::map<std::string, std::string> record;*/
+/*            int i = 0;*/
+/*            for(int vidx = 2; vidx < argc; ++i, ++vidx)*/
+/*            {*/
+/*                if(sqlite3_value_type(argv[vidx]) != SQLITE_NULL)*/
+/*                {*/
+/*                    std::string v = reinterpret_cast<const char*>(sqlite3_value_text(argv[vidx]));*/
+/*                    record.insert(std::make_pair(vtable->columns[i], v));*/
+/*                }*/
+/*            }*/
+/*            */
+/*            // TODO pipeline.*/
+/*            hash::set(c, vtable->key(row_id), record);*/
+/*            set::add(c, vtable->key("rows"), std::to_string(row_id));*/
+/*        }*/
+/*        catch(const hiredis::error& ex)*/
+/*        {*/
+/*            return SQLITE_ERROR;*/
+/*        }*/
+/*    }*/
+/*    else if(argc > 1 && argv[0] && argv[0] != argv[1])*/
+/*    {*/
+/*//        sqlite3_int64 old_row_id = sqlite3_value_int64(argv[0]);*/
+/*//        sqlite3_int64 row_id = sqlite3_value_int64(argv[1]);*/
+/*        */
+/*        // unhandled.*/
+/*        return SQLITE_ERROR;*/
+/*    }*/
+/*    else*/
+/*    {*/
+/*        // eh? unhandled.*/
+/*        return SQLITE_ERROR;*/
+/*    }*/
+
+/*    return SQLITE_OK;*/
     return SQLITE_ERROR;
 }
 
