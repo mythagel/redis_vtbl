@@ -35,7 +35,7 @@ void  vector_sort(vector_t *vector, int (*cmp)(const void *l, const void *r));
 int   vector_push(vector_t *vector, void *value);
 void* vector_find(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r));
 /* bsearch precondition: vector is sorted by cmp */
-void* vector_bsearch(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r));
+void* vector_bsearch(vector_t *vector, const void *value, int (*cmp)(const void *l, const void *r));
 void  vector_free(vector_t *vector);
 
 #endif /* VECTOR_H_ */

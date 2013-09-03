@@ -77,7 +77,7 @@ void* vector_find(vector_t *vector, void *value, int (*cmp)(const void *l, const
     return 0;
 }
 
-void* vector_bsearch(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r)) {
+void* vector_bsearch(vector_t *vector, const void *value, int (*cmp)(const void *l, const void *r)) {
     return bsearch(value, vector->data, vector->size, vector->elem_size, cmp);
 }
 
