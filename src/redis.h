@@ -9,6 +9,7 @@
 #define REDIS_H_
 #include <stdint.h>
 #include "vector.h"
+#include "list.h"
 #include <hiredis/hiredis.h>
 
 /*-----------------------------------------------------------------------------
@@ -22,5 +23,7 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply);
 int redis_reply_string_array(vector_t *vector, redisReply *reply);
 
 int redis_incr(redisContext *c, const char *key, int64_t *old);
+
+void redis_n_replies(redisContext *c, size_t n, list_t *replies);
 
 #endif /* REDIS_H_ */
