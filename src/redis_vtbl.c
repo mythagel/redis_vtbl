@@ -481,17 +481,25 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
     int err;
     redis_vtbl_vtab *vtab;
     sqlite3_int64 row_id;
+    redisReply *reply;
     
-    vtab = (redis_vtbl_vtab*)pVtab;
+    vtab = (redis_vtbl_vtab*)pVTab;
     
     if(argc == 1) {
+        list_t replies;
+        list_init(&replies, freeReplyObject);
+        
         row_id = sqlite3_value_int64(argv[0]);
         /* delete */
-        /* MULTI */
+        redisAppendCommand(vtab->c, "MULTI");
         /* erase object */
         /* erase from rowids */
         /* erase from indexes */
-        /* EXEC */
+        redisAppendCommand(vtab->c, "EXEC");
+        
+        redis_n_replies(vtab->c, 2, &replies);
+        /* todo check replies */
+        list_free(&replies);
         
     } else if(sqlite3_value_type(argv[0]) == SQLITE_NULL) {
         if(sqlite3_value_type(argv[1]) != SQLITE_NULL)
@@ -501,20 +509,21 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
         if(err) return SQLITE_ERROR;
         
         /* insert */
-        /* MULIT */
+        redisAppendCommand(vtab->c, "MULTI");
         /* create object */
         /* add to rowids */
         /* add to indexes */
-        /* EXEC */
+        redisAppendCommand(vtab->c, "EXEC");
         
     } else if(argv[0] == argv[1]) {
         row_id = sqlite3_value_int64(argv[0]);
         /* update */
         /* WATCH key */
-        /* MULIT */
+        redisAppendCommand(vtab->c, "MULTI");
         /* update object */
         /* update indexes */
-        /* EXEC */
+        redisAppendCommand(vtab->c, "EXEC");
+        
     } else {
         /* attempt to update rowid disallowed */
         return SQLITE_ERROR;
@@ -578,21 +587,6 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
 /*            return SQLITE_ERROR;*/
 /*        }*/
 /*    }*/
-/*    else if(argc > 1 && argv[0] && argv[0] != argv[1])*/
-/*    {*/
-/*//        sqlite3_int64 old_row_id = sqlite3_value_int64(argv[0]);*/
-/*//        sqlite3_int64 row_id = sqlite3_value_int64(argv[1]);*/
-/*        */
-/*        // unhandled.*/
-/*        return SQLITE_ERROR;*/
-/*    }*/
-/*    else*/
-/*    {*/
-/*        // eh? unhandled.*/
-/*        return SQLITE_ERROR;*/
-/*    }*/
-
-/*    return SQLITE_OK;*/
     return SQLITE_ERROR;
 }
 
@@ -745,6 +739,7 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
         case CURSOR_INDEX_ROWID_LT:
         case CURSOR_INDEX_ROWID_GE:
         case CURSOR_INDEX_ROWID_LE:
+            if(argc == 0) return SQLITE_ERROR;
             row_id = sqlite3_value_int64(argv[0]);
             break;
     }
@@ -788,11 +783,17 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
             break;
     }
 
-    if(!reply) return SQLITE_ERROR;
-    
-    err = redis_reply_numeric_array(&cursor->rows, reply);
-    freeReplyObject(reply);
-    if(err) return SQLITE_ERROR;
+    if(idxNum == CURSOR_INDEX_ROWID_EQ) {
+        
+    } else if(idxNum == CURSOR_INDEX_NAMED_EQ) {
+        
+    } else {
+        if(!reply) return SQLITE_ERROR;
+        
+        err = redis_reply_numeric_array(&cursor->rows, reply);
+        freeReplyObject(reply);
+        if(err) return SQLITE_ERROR;
+    }
 
     cursor->current_row = vector_begin(&cursor->rows);
     redis_vtbl_cursor_get(cursor);
