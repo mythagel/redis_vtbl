@@ -114,11 +114,11 @@ SQLITE_EXTENSION_INIT1
 /*}*/
 
 /* A redis backed sqlite3 virtual table implementation.
- * prefix.db.table.[rowid]      = hash of the row data.
+ * prefix.db.table:[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
  * prefix.db.table.indices      = master index (set) of indices on the table
  * prefix.db.table.index.rowid  = master index (set) of rows in the table
- * prefix.db.table.index.x      = additional set(rowid) index(s) for column x */
+ * prefix.db.table.index:x      = additional set(rowid) index(s) for column x */
 
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
@@ -126,7 +126,6 @@ typedef struct redis_vtbl_vtab {
     redis_vtbl_connection conn_spec;
     redisContext *c;
     char *key_base;
-    char *rowid_key;
     
     /* ordered list of columns */
     vector_t columns;
@@ -308,15 +307,6 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
         return SQLITE_NOMEM;
     }
     
-    vtab->rowid_key = strdup(vtab->key_base);
-    if(!vtab->rowid_key) {
-        free(vtab->key_base);
-        redis_vtbl_connection_free(&vtab->conn_spec);
-        return SQLITE_NOMEM;
-    }
-    string_append(&vtab->rowid_key, ".");
-    string_append(&vtab->rowid_key, "rowid");
-    
     vector_init(&vtab->columns, sizeof(redis_vtbl_column_spec), (void(*)(void*))redis_vtbl_column_spec_free);
     vector_init(&vtab->index, sizeof(char*), free);
     
@@ -344,13 +334,18 @@ static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
 }
 
 static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *rowid) {
-    int err;
-    int64_t old;
+    redisReply *reply;
     
-    err = redis_incr(vtab->c, vtab->rowid_key, &old);
-    if(err) return err;
+    reply = redisCommand(vtab->c, "INCR %s.rowid", vtab->key_base);
+    if(!reply) return 1;
     
-    *rowid = old;
+    if(reply->type != REDIS_REPLY_INTEGER) {
+        freeReplyObject(reply);
+        return 1;
+    }
+    
+    *rowid = reply->integer;
+    freeReplyObject(reply);
     return 0;
 }
 
@@ -358,7 +353,6 @@ static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     redis_vtbl_connection_free(&vtab->conn_spec);
     if(vtab->c) redisFree(vtab->c);
     free(vtab->key_base);
-    free(vtab->rowid_key);
     vector_free(&vtab->columns);
     vector_free(&vtab->index);
 }
@@ -654,7 +648,7 @@ static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     vector_push(&args, strdup("HMGET"));
     
     string_append(&str, vtab->key_base);
-    string_append(&str, ".");
+    string_append(&str, ":");
     string_append(&str, i64tos(*cur->current_row));
     if(!str) {
         vector_free(&args);
@@ -721,49 +715,64 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
     redis_vtbl_vtab *vtab;
     redis_vtbl_cursor *cursor;
     redisReply *reply;
+    sqlite3_int64 row_id;
     
     cursor = (redis_vtbl_cursor*)pCursor;
     vtab = cursor->vtab;
+    
+    vector_clear(&cursor->rows);
+    
+    switch(idxNum) {
+        case CURSOR_INDEX_ROWID_EQ:
+        case CURSOR_INDEX_ROWID_GT:
+        case CURSOR_INDEX_ROWID_LT:
+        case CURSOR_INDEX_ROWID_GE:
+        case CURSOR_INDEX_ROWID_LE:
+            row_id = sqlite3_value_int64(argv[0]);
+            break;
+    }
     
     switch(idxNum) {
         case CURSOR_INDEX_SCAN:
             reply = redisCommand(vtab->c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
             break;
+        
         case CURSOR_INDEX_ROWID_EQ:
-            /* special */
+            vector_push(&cursor->rows, &row_id);
             break;
         case CURSOR_INDEX_ROWID_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf (%lld", vtab->key_base);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf (%lld", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid %lld +inf", vtab->key_base);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid %lld +inf", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
             break;
+        
+        /* todo */
         case CURSOR_INDEX_NAMED_EQ:
             /* special */
             break;
         case CURSOR_INDEX_NAMED_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s (%lld +inf", vtab->key_base, idxStr);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr);
             break;
         case CURSOR_INDEX_NAMED_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s -inf (%lld", vtab->key_base, idxStr);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%lld", vtab->key_base, idxStr);
             break;
         case CURSOR_INDEX_NAMED_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s %lld +inf", vtab->key_base, idxStr);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %lld +inf", vtab->key_base, idxStr);
             break;
         case CURSOR_INDEX_NAMED_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s -inf %lld", vtab->key_base, idxStr);
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %lld", vtab->key_base, idxStr);
             break;
     }
 
     if(!reply) return SQLITE_ERROR;
     
-    vector_clear(&cursor->rows);
     err = redis_reply_numeric_array(&cursor->rows, reply);
     freeReplyObject(reply);
     if(err) return SQLITE_ERROR;
