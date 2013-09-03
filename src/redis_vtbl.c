@@ -146,8 +146,18 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
 
 enum {
     CURSOR_INDEX_SCAN,
-    CURSOR_INDEX_ROWID,
-    CURSOR_INDEX_NAMED
+    
+    CURSOR_INDEX_ROWID_EQ,
+    CURSOR_INDEX_ROWID_GT,
+    CURSOR_INDEX_ROWID_LT,
+    CURSOR_INDEX_ROWID_GE,
+    CURSOR_INDEX_ROWID_LE,
+    
+    CURSOR_INDEX_NAMED_EQ,
+    CURSOR_INDEX_NAMED_GT,
+    CURSOR_INDEX_NAMED_LT,
+    CURSOR_INDEX_NAMED_GE,
+    CURSOR_INDEX_NAMED_LE,
 };
 
 typedef struct redis_vtbl_cursor {
@@ -483,10 +493,6 @@ static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *con
     return redis_vtbl_create(db, pAux, argc, argv, ppVTab, pzErr);
 }
 
-static int eq_rowid_p(const struct sqlite3_index_constraint *constraint) {
-    return constraint->op == SQLITE_INDEX_CONSTRAINT_EQ && constraint->iColumn == -1;
-}
-
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
     redis_vtbl_vtab *vtab;
     int i;
@@ -494,21 +500,34 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
     vtab = (redis_vtbl_vtab*)pVTab;
     
     pIndexInfo->idxNum = CURSOR_INDEX_SCAN;
-    pIndexInfo->estimatedCost = 1000.0;         /* todo retrieve row estimate from redis on connect. */
+    pIndexInfo->estimatedCost = 10000.0;
     
     for(i = 0; i < pIndexInfo->nConstraint; ++i) {
         struct sqlite3_index_constraint *constraint = &pIndexInfo->aConstraint[i];
         if(!constraint->usable) continue;
         
-        if(eq_rowid_p(constraint)) {
-            pIndexInfo->idxNum = CURSOR_INDEX_ROWID;
-            pIndexInfo->estimatedCost = 1.0;
+        if(constraint->iColumn == /* rowid */ -1) {
             pIndexInfo->aConstraintUsage[i].argvIndex = 1;
+            pIndexInfo->estimatedCost = constraint->op == SQLITE_INDEX_CONSTRAINT_EQ ? 1.0 : 2500.0;
+            
+            switch(constraint->op) {
+                case SQLITE_INDEX_CONSTRAINT_EQ:
+                    pIndexInfo->idxNum = CURSOR_INDEX_ROWID_EQ;
+                    break;
+                case SQLITE_INDEX_CONSTRAINT_GT:
+                    pIndexInfo->idxNum = CURSOR_INDEX_ROWID_GT;
+                    break;
+                case SQLITE_INDEX_CONSTRAINT_LE:
+                    pIndexInfo->idxNum = CURSOR_INDEX_ROWID_LE;
+                    break;
+                case SQLITE_INDEX_CONSTRAINT_LT:
+                    pIndexInfo->idxNum = CURSOR_INDEX_ROWID_LT;
+                    break;
+                case SQLITE_INDEX_CONSTRAINT_GE:
+                    pIndexInfo->idxNum = CURSOR_INDEX_ROWID_GE;
+                    break;
+            }
             break;
-        }
-        
-        if(constraint->iColumn == -1) {
-            // other constraints on the rowid
         } else {
             redis_vtbl_column_spec *cspec;
             const char *index_name;
@@ -520,10 +539,29 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
             
             index_name = vector_bsearch(&vtab->index, cspec->name, (int (*)(const void *, const void *))strcmp);
             if(index_name) {
-                /* todo: tell sqlite to use this index */
+                pIndexInfo->aConstraintUsage[i].argvIndex = 1;
+                pIndexInfo->estimatedCost = constraint->op == SQLITE_INDEX_CONSTRAINT_EQ ? 10.0 : 5000.0;
+                pIndexInfo->idxStr = (char*)index_name;
+                
+                switch(constraint->op) {
+                    case SQLITE_INDEX_CONSTRAINT_EQ:
+                        pIndexInfo->idxNum = CURSOR_INDEX_NAMED_EQ;
+                        break;
+                    case SQLITE_INDEX_CONSTRAINT_GT:
+                        pIndexInfo->idxNum = CURSOR_INDEX_NAMED_GT;
+                        break;
+                    case SQLITE_INDEX_CONSTRAINT_LE:
+                        pIndexInfo->idxNum = CURSOR_INDEX_NAMED_LE;
+                        break;
+                    case SQLITE_INDEX_CONSTRAINT_LT:
+                        pIndexInfo->idxNum = CURSOR_INDEX_NAMED_LT;
+                        break;
+                    case SQLITE_INDEX_CONSTRAINT_GE:
+                        pIndexInfo->idxNum = CURSOR_INDEX_NAMED_GE;
+                        break;
+                }
+                break;
             }
-            
-            /*pIndexInfo->aConstraintUsage[x].argvIndex = ++cons_idx;*/
         }
     }
     
@@ -596,14 +634,15 @@ static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab)
 /* retrieve column_data for current_row */
 static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     int err;
+    int eof;
     redis_vtbl_vtab *vtab;
     vector_t args;
     redisReply *reply;
     char *str;
     size_t i;
 
-    if(!cur->current_row)
-        return;
+    eof = cur->current_row == vector_end(&cur->rows);
+    if(eof) return;
     
     vtab = cur->vtab;
     vector_clear(&cur->column_data);
@@ -677,26 +716,62 @@ static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor) {
     return SQLITE_OK;
 }
 
-/* use HMGET to retrieve key values.
- * guarantees order of keys is well defined.
-*/
 static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr, int argc, sqlite3_value **argv) {
+    int err;
+    redis_vtbl_vtab *vtab;
+    redis_vtbl_cursor *cursor;
+    redisReply *reply;
+    
+    cursor = (redis_vtbl_cursor*)pCursor;
+    vtab = cursor->vtab;
     
     switch(idxNum) {
-        case CURSOR_INDEX_SCAN: {
-            /* full table scan */
+        case CURSOR_INDEX_SCAN:
+            reply = redisCommand(vtab->c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
             break;
-        }
-        case CURSOR_INDEX_ROWID: {
-            /* direct rowid lookup */
+        case CURSOR_INDEX_ROWID_EQ:
+            /* special */
             break;
-        }
-        case CURSOR_INDEX_NAMED: {
-            /* lookup by names index */
+        case CURSOR_INDEX_ROWID_GT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base);
             break;
-        }
+        case CURSOR_INDEX_ROWID_LT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf (%lld", vtab->key_base);
+            break;
+        case CURSOR_INDEX_ROWID_GE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid %lld +inf", vtab->key_base);
+            break;
+        case CURSOR_INDEX_ROWID_LE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base);
+            break;
+        case CURSOR_INDEX_NAMED_EQ:
+            /* special */
+            break;
+        case CURSOR_INDEX_NAMED_GT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s (%lld +inf", vtab->key_base, idxStr);
+            break;
+        case CURSOR_INDEX_NAMED_LT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s -inf (%lld", vtab->key_base, idxStr);
+            break;
+        case CURSOR_INDEX_NAMED_GE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s %lld +inf", vtab->key_base, idxStr);
+            break;
+        case CURSOR_INDEX_NAMED_LE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.%s -inf %lld", vtab->key_base, idxStr);
+            break;
     }
-    return SQLITE_ERROR;
+
+    if(!reply) return SQLITE_ERROR;
+    
+    vector_clear(&cursor->rows);
+    err = redis_reply_numeric_array(&cursor->rows, reply);
+    freeReplyObject(reply);
+    if(err) return SQLITE_ERROR;
+
+    cursor->current_row = vector_begin(&cursor->rows);
+    redis_vtbl_cursor_get(cursor);
+    
+    return SQLITE_OK;
 }
 
 static int redis_vtbl_cursor_next(sqlite3_vtab_cursor *pCursor) {
