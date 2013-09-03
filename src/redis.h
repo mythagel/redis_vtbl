@@ -18,6 +18,9 @@
 /* vector must already be inited for int64_t members */
 int redis_reply_numeric_array(vector_t *vector, redisReply *reply);
 
+/* vector must already be inited for char* members with free */
+int redis_reply_string_array(vector_t *vector, redisReply *reply);
+
 int redis_incr(redisContext *c, const char *key, int64_t *old);
 
 #endif /* REDIS_H_ */
