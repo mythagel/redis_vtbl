@@ -15,12 +15,6 @@ SQLITE_EXTENSION_INIT1
 
 /*
 
-NULL
-INTEGER
-REAL
-TEXT
-BLOB
-
 map relational data to redis.
 
 each row is a hash in redis
@@ -51,20 +45,6 @@ lookup by rowid does not need to lookup in the set.
 any iteration needs to lookup in the set.
 
 */
-
-/*struct column_spec*/
-/*{*/
-/*    std::string name;*/
-/*    enum class Type*/
-/*    {*/
-/*        INTEGER = SQLITE_INTEGER,*/
-/*        FLOAT = SQLITE_FLOAT,*/
-/*        BLOB = SQLITE_BLOB,*/
-/*        TEXT = SQLITE_TEXT,*/
-/*    } type;*/
-/*    int min;*/
-/*    int max;*/
-/*};*/
 
 /*struct cursor : sqlite3_vtab_cursor*/
 /*{*/
@@ -278,7 +258,22 @@ any iteration needs to lookup in the set.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
  * prefix.db.table.indices      = master index (set) of indices on the table
  * prefix.db.table.index.rowid  = master index (set) of rows in the table
- * prefix.db.table.index.x      = additional set(rowid) index(s) for column x*/
+ * prefix.db.table.index.x      = additional set(rowid) index(s) for column x */
+
+typedef struct redis_vtbl_vtab {
+    sqlite3_vtab base;
+    
+    redis_vtbl_connection conn_spec;
+    redisContext *c;
+    char *key_base;
+    char *rowid_key;
+    
+    /* ordered list of columns */
+    vector_t columns;
+    
+    /* sorted list of indexes */
+    vector_t index;
+} redis_vtbl_vtab;
 
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
 static int redis_vtbl_connect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
@@ -288,6 +283,22 @@ static int redis_vtbl_disconnect(sqlite3_vtab *pVTab);
 static int redis_vtbl_destroy(sqlite3_vtab *pVTab);
 
 static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_value **argv);
+
+enum {
+    CURSOR_INDEX_LINEAR,
+    CURSOR_INDEX_ROWID,
+    CURSOR_INDEX_NAMED
+};
+
+typedef struct redis_vtbl_cursor {
+    sqlite3_vtab_cursor base;
+    redis_vtbl_vtab *vtab;
+    
+    vector_t rows;
+    sqlite3_int64 *current_row;
+    
+    list_t columns;
+} redis_vtbl_cursor;
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor);
 static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor);
@@ -299,7 +310,7 @@ static int redis_vtbl_cursor_rowid(sqlite3_vtab_cursor *pCursor, sqlite3_int64 *
 
 
 /*-----------------------------------------------------------------------------
- * Redis backed Virtual table
+ * String helpers
  *----------------------------------------------------------------------------*/
 
 static int string_append(char** str, const char* src) {
@@ -315,42 +326,76 @@ static int string_append(char** str, const char* src) {
     return 0;
 }
 
-const char* trim_ws(const char *str) {
-    while(*str && isspace(*str))
-        ++str;
-    return str;
+
+/*-----------------------------------------------------------------------------
+ * Column definition
+ *----------------------------------------------------------------------------*/
+
+typedef struct redis_vtbl_column_spec {
+    char *name;
+    int data_type;
+} redis_vtbl_column_spec;
+
+static int column_type_int_p(const char *data_type) {
+    return !strncasecmp(data_type, "INT", 3);
+}
+static int column_type_text_p(const char *data_type) {
+    return !strncasecmp(data_type, "CHAR", 4) || !strncasecmp(data_type, "CLOB", 4) || !strncasecmp(data_type, "TEXT", 4);
+}
+static int column_type_float_p(const char *data_type) {
+    return !strncasecmp(data_type, "REAL", 4) || !strncasecmp(data_type, "FLOA", 4) || !strncasecmp(data_type, "DOUB", 4);
 }
 
-/* parse the column name out of an sql definition */
-static int parse_column_name(const char *column_def, char **column_name) {
-    size_t len;
+static int redis_vtbl_column_spec_init(redis_vtbl_column_spec *cspec, const char *column_def) {
+    int err;
+    list_t tok_list;
+    const char *data_type;
     
-    column_def = trim_ws(column_def);
-    if(!*column_def) return 1;
+    err = list_strtok(&tok_list, column_def, " \t\n");
+    if(err) return 1;
+
+    if(tok_list.size < 1) {
+        list_free(&tok_list);
+        return 1;
+    }
+
+    /* Column name */
+    cspec->name = list_set(&tok_list, 0, 0);
     
-    len = strcspn(column_def, " \t\n");
-    *column_name = strndup(column_def, len);
+    /* If the next token is not CONSTRAINT then it's a type name
+     * Determine column type based on sqlite affinity rules.
+     * Default case is TEXT where whereas the sqlite default is NUMERIC */
+    cspec->data_type = SQLITE_TEXT;
     
-    if(!*column_name) return 1;
+    data_type = list_get(&tok_list, 1);
+    if(tok_list.size > 1 && strcasecmp(data_type, "CONSTRAINT")) {
+
+        if(column_type_int_p(data_type))
+            cspec->data_type = SQLITE_INTEGER;
+        
+        else if(column_type_text_p(data_type))  
+            cspec->data_type = SQLITE_TEXT;
+        
+        else if(column_type_float_p(data_type))
+            cspec->data_type = SQLITE_FLOAT;
+    }
+    
+    list_free(&tok_list);
     return 0;
 }
 
-enum {
-    CURSOR_INDEX_LINEAR,
-    CURSOR_INDEX_ROWID,
-    CURSOR_INDEX_NAMED
-};
+static int redis_vtbl_column_spec_cmp(const redis_vtbl_column_spec *l, const redis_vtbl_column_spec *r) {
+    return strcmp(l->name, r->name);
+}
 
-typedef struct redis_vtbl_vtab {
-    sqlite3_vtab base;
-    
-    redis_vtbl_connection conn_spec;
-    redisContext *c;
-    char *key_base;
-    char *rowid_key;
-    list_t columns;
-    vector_t index;
-} redis_vtbl_vtab;
+static void redis_vtbl_column_spec_free(redis_vtbl_column_spec *cspec) {
+    free(cspec->name);
+}
+
+
+/*-----------------------------------------------------------------------------
+ * Redis backed Virtual table
+ *----------------------------------------------------------------------------*/
 
 static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, const char *db, const char *table, const char *prefix, char **pzErr) {
     int err;
@@ -391,8 +436,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     string_append(&vtab->rowid_key, ".");
     string_append(&vtab->rowid_key, "rowid");
     
-    list_init(&vtab->columns, free);
-    /* todo push the column names onto the columns list */
+    vector_init(&vtab->columns, sizeof(redis_vtbl_column_spec), (void(*)(void*))redis_vtbl_column_spec_free);
     
     vector_init(&vtab->index, sizeof(char*), free);
     /* todo retrieve indices from redis */
@@ -416,7 +460,7 @@ static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     if(vtab->c) redisFree(vtab->c);
     free(vtab->key_base);
     free(vtab->rowid_key);
-    list_free(&vtab->columns);
+    vector_free(&vtab->columns);
     vector_free(&vtab->index);
 }
 
@@ -431,8 +475,10 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     size_t n;
     int err;
     list_t column;
-    char* column_name;
     redis_vtbl_vtab *vtab;
+    redis_vtbl_column_spec cspec;
+    
+    (void)pAux; /* unused */
     
     if(argc < 6) {
         *pzErr = sqlite3_mprintf("Bad format; Expected ip[:port] | sentinel service ip[:port] [ip[:port]...], key_prefix, column_def0, ...column_defN");
@@ -459,6 +505,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
      * returns an sqlite error code on failure */
     err = redis_vtbl_vtab_init(vtab, conn_config, db_name, table, prefix, pzErr);
     if(err) {
+        /* error message is already set */
         free(vtab);
         return err;
     }
@@ -496,16 +543,19 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
     
-    /* fill column names (todo and types) */
+    /* fill column names and types */
     for(n = 0; n < column.size; ++n) {
-        err = parse_column_name(list_get(&column, n), &column_name);
+        err = redis_vtbl_column_spec_init(&cspec, list_get(&column, n));
         if(err) {
+            *pzErr = sqlite3_mprintf("Unable to parse column definition '%s'", list_get(&column, n));
+            
+            list_free(&column);
             redis_vtbl_vtab_free(vtab);
             free(vtab);
             return SQLITE_ERROR;
         }
         
-        list_push(&vtab->columns, column_name);
+        vector_push(&vtab->columns, &cspec);
     }
     
     /* Create table definition and pass to sqlite */
@@ -542,7 +592,6 @@ static int eq_rowid_p(const struct sqlite3_index_constraint *constraint) {
 static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexInfo) {
     redis_vtbl_vtab *vtab;
     int i;
-    int cons_idx = 0;
     
     vtab = (redis_vtbl_vtab*)pVTab;
     
@@ -550,7 +599,7 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
     pIndexInfo->estimatedCost = 1000.0;         /* todo retrieve row estimate from redis on connect. */
     
     for(i = 0; i < pIndexInfo->nConstraint; ++i) {
-        const char *column_name;
+        redis_vtbl_column_spec *cspec;
         const char *index_name;
         struct sqlite3_index_constraint *constraint = &pIndexInfo->aConstraint[i];
         if(!constraint->usable) continue;
@@ -565,12 +614,12 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
             // other constraints on the rowid
         } else {
         
-            /* lookup the column name by id
+            /* lookup the column by id
              * Determine if that column is indexed */
-            column_name = list_get(&vtab->columns, constraint->iColumn);
-            if(!column_name) return SQLITE_ERROR;
+            cspec = vector_get(&vtab->columns, constraint->iColumn);
+            if(!cspec) return SQLITE_ERROR;
             
-            index_name = vector_bsearch(&vtab->index, column_name, strcmp);
+            index_name = vector_bsearch(&vtab->index, cspec->name, (int (*)(const void *, const void *))strcmp);
             
             /*pIndexInfo->aConstraintUsage[x].argvIndex = ++cons_idx;*/
         }
@@ -628,16 +677,6 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
 /*-----------------------------------------------------------------------------
  * Redis backed Virtual table cursor
  *----------------------------------------------------------------------------*/
-
-typedef struct redis_vtbl_cursor {
-    sqlite3_vtab_cursor base;
-    redis_vtbl_vtab *vtab;
-    
-    vector_t rows;
-    sqlite3_int64 *current_row;
-    
-    list_t columns;
-} redis_vtbl_cursor;
 
 static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab) {
     memset(&cur->base, 0, sizeof(sqlite3_vtab_cursor));
