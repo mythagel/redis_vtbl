@@ -22,14 +22,14 @@ void list_init(list_t *list, void (*value_free)(void *value)) {
 }
 
 void* list_get(list_t *list, size_t index) {
-    if(index > list->size)
+    if(index >= list->size)
         return 0;
     return list->data[index];
 }
 
 void* list_set(list_t *list, size_t index, void *value) {
     void *old;
-    if(index > list->size)
+    if(index >= list->size)
         return 0;
     
     old = list->data[index];
