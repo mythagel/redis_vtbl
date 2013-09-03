@@ -13,6 +13,12 @@
 #include <string.h>
 #include <stdlib.h>
 
+static const char* trim_ws(const char *str) {
+    while(*str && isspace(*str))
+        ++str;
+    return str;
+}
+
 /* Initialise a new connection object from the given configuration.
  *
  * address[:port]
@@ -22,8 +28,7 @@
  * A connection to the redis sentinel service at the given addresses. */
 int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) {
     
-    while(*config && isspace(*config))
-        ++config;
+    config = trim_ws(config);
 
     if(!*config)
         return CONNECTION_BAD_FORMAT;
