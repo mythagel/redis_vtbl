@@ -3,7 +3,7 @@ redis_vtbl
 
 Overview
 --------
-An implementation of an [sqlite3](http://www.sqlite.org/) virtual table module that stores data in [redis](http://redis.io/).
+An [sqlite3](http://www.sqlite.org/) virtual table module that stores data in [redis](http://redis.io/).
 
 Different sqlite database instances on (potentially) different systems with the same virtual table definition transparently share their data.
 
