@@ -69,6 +69,7 @@ typedef struct redis_vtbl_cursor {
     sqlite3_int64 *current_row;
     
     list_t column_data;
+    int column_data_valid;
 } redis_vtbl_cursor;
 
 static int redis_vtbl_cursor_open(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor);
@@ -681,6 +682,7 @@ static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab)
     cur->current_row = 0;
     
     list_init(&cur->column_data, free);
+    cur->column_data_valid = 0;
     
     return SQLITE_OK;
 }
@@ -734,6 +736,7 @@ static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     err = redis_reply_string_list(&cur->column_data, reply);
     freeReplyObject(reply);
     if(err) return;
+    cur->column_data_valid = 1;
 }
 
 static void redis_vtbl_cursor_free(redis_vtbl_cursor *cur) {
@@ -846,22 +849,18 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
     }
 
     cursor->current_row = vector_begin(&cursor->rows);
-    redis_vtbl_cursor_get(cursor);
+    cursor->column_data_valid = 0;
     
     return SQLITE_OK;
 }
 
 static int redis_vtbl_cursor_next(sqlite3_vtab_cursor *pCursor) {
-    int eof;
     redis_vtbl_cursor *cursor;
+    
     cursor = (redis_vtbl_cursor*)pCursor;
-    
     ++cursor->current_row;
-    eof = cursor->current_row == vector_end(&cursor->rows);
+    cursor->column_data_valid = 0;
     
-    if(!eof) {
-        redis_vtbl_cursor_get(cursor);
-    }
     return SQLITE_OK;
 }
 
@@ -886,6 +885,10 @@ static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_contex
 
     cspec = vector_get(&vtab->columns, N);
     if(!cspec) return SQLITE_ERROR;
+
+    if(!cursor->column_data_valid) {
+        redis_vtbl_cursor_get(cursor);
+    }
     
     value = list_get(&cursor->column_data, N);
     
