@@ -5,7 +5,7 @@ Overview
 --------
 An [sqlite3](http://www.sqlite.org/) virtual table module that stores data in [redis](http://redis.io/).
 
-Different sqlite database instances on (potentially) different systems with the same virtual table definition transparently share their data.
+Different sqlite database instances on (potentially) different systems with the same virtual table definition transparently share their data via redis.
 
 `DROP TABLE` on any of the instances individually does not remove any data.
 
