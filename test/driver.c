@@ -42,17 +42,30 @@ int quiet_exec(sqlite3 *db, const char* sql) {
     }
 }
 
-void perf_test(sqlite3 *db) {
+void perf_test(sqlite3 *db, int virt) {
     char buf[4096];
     unsigned int i;
     
-    snprintf(buf, sizeof(buf), 
-    /*"CREATE VIRTUAL TABLE perf USING redis (localhost:6379, prefix,\n"*/
-    "CREATE TABLE perf (\n"
-    "   timestamp          INTEGER,\n"
-    "   idx          INTEGER\n"
-    ");\n");
+    if(virt) {
+        snprintf(buf, sizeof(buf), 
+        "CREATE VIRTUAL TABLE perf USING redis (localhost:6379, prefix,\n"
+        "   timestamp          INTEGER,\n"
+        "   idx          INTEGER\n"
+        ");\n");
+
+    } else {
+        snprintf(buf, sizeof(buf), 
+        "CREATE TABLE perf (\n"
+        "   timestamp          INTEGER,\n"
+        "   idx          INTEGER\n"
+        ");\n");
+
+    }
     if(exec(db, buf)) return;
+    
+    /* level the playing field - data persists in redis even after drop table */
+    exec(db, "delete from perf");
+    
     
     for(i = 0; i < 100000; ++i) {
         snprintf(buf, sizeof(buf), 
@@ -62,7 +75,10 @@ void perf_test(sqlite3 *db) {
         if(quiet_exec(db, buf)) return;
     }
     
-    exec(db, "select max(timestamp) - min(timestamp) as duration from perf");
+    if(virt)
+        exec(db, "select max(timestamp) - min(timestamp) as virt_duration from perf");
+    else
+        exec(db, "select max(timestamp) - min(timestamp) as sql_duration from perf");
     exec(db, "DROP TABLE perf");
 }
 
@@ -90,6 +106,8 @@ int main() {
     } else {
         fprintf(stdout, "Loaded module successfully\n");
     }
+
+    exec(db, "PRAGMA synchronous = OFF");
 
     /* test0 - sqlite table */
     snprintf(buf, sizeof(buf), 
@@ -132,7 +150,8 @@ int main() {
     exec(db, "DELETE from test1");
 
 
-    perf_test(db);
+    perf_test(db, 0);
+    perf_test(db, 1);
 
 // cleanup
     exec(db, "DROP TABLE test0");
