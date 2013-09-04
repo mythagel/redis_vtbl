@@ -32,7 +32,9 @@ void redis_n_replies(redisContext *c, size_t n, list_t *replies);
  * predicates return 1 for match and 0 for not matched */
 typedef int (*redis_reply_predicate_t)(redisReply *);
 int redis_check_expected(list_t *replies, ...);
+int redis_check_expected_list(list_t *replies, list_t *expected);
 int redis_check_expected_bulk(redisReply *bulk_reply, ...);
+int redis_check_expected_bulk_list(redisReply *bulk_reply, list_t *expected);
 
 /* any valid status */
 int redis_status_reply_p(redisReply *reply);

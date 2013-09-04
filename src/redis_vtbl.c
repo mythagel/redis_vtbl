@@ -548,6 +548,8 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     size_t i;
     redis_vtbl_column_spec *cspec;
     list_t replies;
+    list_t expected;
+    list_t expected_exec;
     
     if(sqlite3_value_type(argv[1]) != SQLITE_NULL) {
         vtab->base.zErrMsg = sqlite3_mprintf("User provided rowid disallowed.");
@@ -565,7 +567,11 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     }
     *pRowid = row_id;
     
+    list_init(&expected, 0);
+    list_init(&expected_exec, 0);
+    
     redisAppendCommand(vtab->c, "MULTI");
+    list_push(&expected, redis_status_reply_p);
     
     /* HMSET key column0 value0 ...columnN valueN */                                                    /* create object */
     list_init(&args, free);
@@ -585,35 +591,45 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     }
     
     redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_status_reply_p);
     list_free(&args);
+    
     redisAppendCommand(vtab->c, "ZADD %s.index.rowid %lld %lld", vtab->key_base, row_id, row_id);       /* add to rowids */
-    /* todo */                                                                                          /* add to indexes */
-    /*
-    for each indexed column {
-        zadd prefix.db.table.index:column_name 0 column_value
-        sadd prefix.db.table.index:column_name:column_value rowid
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
+    
+    for(i = 0; i < vtab->columns.size; ++i) {                                                           /* add to indexes */
+        cspec = vector_get(&vtab->columns, i);
+        if(!cspec->indexed) continue;
+        redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        list_push(&expected, redis_status_queued_reply_p);
+        list_push(&expected_exec, redis_integer_reply_p);
+        
+        redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
+        list_push(&expected, redis_status_queued_reply_p);
+        list_push(&expected_exec, redis_integer_reply_p);
     }
-    */
+    
     redisAppendCommand(vtab->c, "EXEC");
+    list_push(&expected, redis_bulk_reply_p);
     
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, 4, &replies);
+    redis_n_replies(vtab->c, expected.size, &replies);
     
-    err = redis_check_expected(&replies, 
-        /* MULTI */ redis_status_reply_p,
-        /* HMSET */ redis_status_queued_reply_p,
-        /* ZADD */  redis_status_queued_reply_p,
-        /* EXEC */  redis_bulk_reply_p);
+    err = redis_check_expected_list(&replies, &expected);
+    list_free(&expected);
+    
     if(err) {
         list_free(&replies);
+        list_free(&expected_exec);
         return SQLITE_ERROR;
     
     } else {
         redisReply *exec_reply;
-        exec_reply = list_get(&replies, 3);
-        err = redis_check_expected_bulk(exec_reply,
-            /* HMSET */ redis_status_reply_p,
-            /* ZADD */  redis_integer_reply_p);
+        exec_reply = list_get(&replies, replies.size-1);
+        err = redis_check_expected_bulk_list(exec_reply, &expected_exec);
+        list_free(&expected_exec);
         if(err) {
             list_free(&replies);
             return SQLITE_ERROR;
@@ -631,14 +647,21 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     size_t i;
     redis_vtbl_column_spec *cspec;
     list_t replies;
+    list_t expected;
+    list_t expected_exec;
     
     if((unsigned)argc != vtab->columns.size + 2) {
         return SQLITE_ERROR;            /* correct number of columns not provided */
     }
     
+    list_init(&expected, 0);
+    list_init(&expected_exec, 0);
+    
     row_id = sqlite3_value_int64(argv[0]);
     redisAppendCommand(vtab->c, "WATCH %s:%lld", vtab->key_base, row_id);                               /* WATCH key */
+    list_push(&expected, redis_status_reply_p);
     redisAppendCommand(vtab->c, "MULTI");
+    list_push(&expected, redis_status_reply_p);
     
     /* HMSET key column0 value0 ...columnN valueN */                                                    /* update object */
     list_init(&args, free);
@@ -658,32 +681,29 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     }
     
     redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_status_reply_p);
     list_free(&args);
     /* todo */                                                                                          /* update indexes */
     redisAppendCommand(vtab->c, "EXEC");
+    list_push(&expected, redis_bulk_reply_p);
     
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, 4, &replies);
+    redis_n_replies(vtab->c, expected.size, &replies);
     
-    err = redis_check_expected(&replies, 
-        /* WATCH */ redis_status_reply_p,
-        /* MULTI */ redis_status_reply_p,
-        /* HMSET */ redis_status_queued_reply_p,
-        /* EXEC */  redis_bulk_reply_p);
+    err = redis_check_expected_list(&replies, &expected);
+    list_free(&expected);
+    
     if(err) {
         list_free(&replies);
+        list_free(&expected_exec);
         return SQLITE_ERROR;
     
     } else {
         redisReply *exec_reply;
-        exec_reply = list_get(&replies, 3);
-        err = redis_check_expected_bulk(exec_reply,
-            /* HMSET */ redis_status_reply_p);
-        
-        /* null response to EXEC means that the transaction was aborted. */
-        if(exec_reply->elements == 0)
-            err = 1;
-        
+        exec_reply = list_get(&replies, replies.size-1);
+        err = redis_check_expected_bulk_list(exec_reply, &expected_exec);
+        list_free(&expected_exec);
         if(err) {
             list_free(&replies);
             return SQLITE_ERROR;
@@ -696,31 +716,40 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
 static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     int err;
     list_t replies;
+    list_t expected;
+    list_t expected_exec;
+    
+    list_init(&expected, 0);
+    list_init(&expected_exec, 0);
     
     redisAppendCommand(vtab->c, "MULTI");
+    list_push(&expected, redis_status_reply_p);
     redisAppendCommand(vtab->c, "DEL %s:%lld", vtab->key_base, row_id);                 /* erase object */
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
     redisAppendCommand(vtab->c, "ZREM %s.index.rowid %lld", vtab->key_base, row_id);    /* erase from rowids */
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
     /* todo */                                                                          /* erase from indexes */
     redisAppendCommand(vtab->c, "EXEC");
+    list_push(&expected, redis_bulk_reply_p);
 
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, 4, &replies);
+    redis_n_replies(vtab->c, expected.size, &replies);
     
-    err = redis_check_expected(&replies, 
-        /* MULTI */ redis_status_reply_p,
-        /* DEL */   redis_status_queued_reply_p,
-        /* ZREM */  redis_status_queued_reply_p,
-        /* EXEC */  redis_bulk_reply_p);
+    err = redis_check_expected_list(&replies, &expected);
+    list_free(&expected);
+    
     if(err) {
         list_free(&replies);
+        list_free(&expected_exec);
         return SQLITE_ERROR;
     
     } else {
         redisReply *exec_reply;
-        exec_reply = list_get(&replies, 3);
-        err = redis_check_expected_bulk(exec_reply,
-            /* DEL */   redis_integer_reply_p,
-            /* ZREM */  redis_integer_reply_p);
+        exec_reply = list_get(&replies, replies.size-1);
+        err = redis_check_expected_bulk_list(exec_reply, &expected_exec);
+        list_free(&expected_exec);
         if(err) {
             list_free(&replies);
             return SQLITE_ERROR;

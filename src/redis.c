@@ -87,8 +87,7 @@ void redis_n_replies(redisContext *c, size_t n, list_t *replies) {
     }
 }
 
-int redis_check_expected(list_t *replies, ...)
-{
+int redis_check_expected(list_t *replies, ...) {
     va_list args;
     size_t i;
     
@@ -107,6 +106,24 @@ int redis_check_expected(list_t *replies, ...)
     }
     
     va_end(args);
+    return 0;
+}
+
+int redis_check_expected_list(list_t *replies, list_t *expected) {
+    size_t i;
+    
+    if(replies->size != expected->size) return 1;
+    
+    for (i = 0; i < replies->size; ++i) {
+        redisReply *reply;
+        redis_reply_predicate_t pred;
+        
+        reply = replies->data[i];
+        pred = expected->data[i];
+        
+        if(!pred(reply)) return 1;
+    }
+    
     return 0;
 }
 
@@ -129,6 +146,24 @@ int redis_check_expected_bulk(redisReply *bulk_reply, ...) {
     }
     
     va_end(args);
+    return 0;
+}
+
+int redis_check_expected_bulk_list(redisReply *bulk_reply, list_t *expected) {
+    size_t i;
+    
+    if(bulk_reply->elements != expected->size) return 1;
+    
+    for (i = 0; i < bulk_reply->elements; ++i) {
+        redisReply *reply;
+        redis_reply_predicate_t pred;
+        
+        reply = bulk_reply->element[i];
+        pred = expected->data[i];
+        
+        if(!pred(reply)) return 1;
+    }
+    
     return 0;
 }
 
