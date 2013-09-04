@@ -20,26 +20,23 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
     int64_t n;
     char *end;
     
-    if(reply->type != REDIS_REPLY_ARRAY)
-        return 1;
+    if(reply->type != REDIS_REPLY_ARRAY) return 1;
     
     vector_reserve(vector, reply->elements);
     for(i = 0; i < reply->elements; ++i) {
         redisReply *element;
         element = reply->element[i];
         
-        if(element->type == REDIS_REPLY_STRING) {
-            errno = 0;
-            n = strtoll(element->str, &end, 10);
-            if(errno || *end) {      /* out-of-range | rubbish characters */
-                continue;
-            }
-
-            err = vector_push(vector, &n);
-            if(err) return 1;
-        } else {
-            return 1;
+        if(element->type != REDIS_REPLY_STRING) return 1;
+        
+        errno = 0;
+        n = strtoll(element->str, &end, 10);
+        if(errno || *end) {      /* out-of-range | rubbish characters */
+            continue;
         }
+
+        err = vector_push(vector, &n);
+        if(err) return 1;
     }
     return 0;
 }
@@ -47,8 +44,7 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
 int redis_reply_string_list(list_t *list, redisReply *reply) {
     size_t i;
     
-    if(reply->type != REDIS_REPLY_ARRAY)
-        return 1;
+    if(reply->type != REDIS_REPLY_ARRAY) return 1;
     
     for(i = 0; i < reply->elements; ++i) {
         redisReply *element;
@@ -95,32 +91,44 @@ int redis_check_expected(list_t *replies, ...)
 {
     va_list args;
     size_t i;
-    redisReply *reply;
-    redis_reply_predicate_t pred;
     
     va_start(args, replies);
     for (i = 0; i < replies->size; ++i) {
-        pred = va_arg(args, redis_reply_predicate_t);
-        reply = replies->data[i];
+        redisReply *reply;
+        redis_reply_predicate_t pred;
         
-        if(!pred(reply)) return 1;
+        reply = replies->data[i];
+        pred = va_arg(args, redis_reply_predicate_t);
+        
+        if(!pred(reply)) {
+            va_end(args);
+            return 1;
+        }
     }
+    
+    va_end(args);
     return 0;
 }
 
 int redis_check_expected_bulk(redisReply *bulk_reply, ...) {
     va_list args;
     size_t i;
-    redisReply *reply;
-    redis_reply_predicate_t pred;
     
     va_start(args, bulk_reply);
     for (i = 0; i < bulk_reply->elements; ++i) {
-        pred = va_arg(args, redis_reply_predicate_t);
-        reply = bulk_reply->element[i];
+        redisReply *reply;
+        redis_reply_predicate_t pred;
         
-        if(!pred(reply)) return 1;
+        reply = bulk_reply->element[i];
+        pred = va_arg(args, redis_reply_predicate_t);
+        
+        if(!pred(reply)) {
+            va_end(args);
+            return 1;
+        }
     }
+    
+    va_end(args);
     return 0;
 }
 

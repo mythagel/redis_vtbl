@@ -30,8 +30,7 @@ int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) 
     
     config = trim_ws(config);
 
-    if(!*config)
-        return CONNECTION_BAD_FORMAT;
+    if(!*config) return CONNECTION_BAD_FORMAT;
     
     conn->service = 0;
     conn->errstr[0] = 0;
@@ -71,9 +70,10 @@ int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) 
             }
             err = vector_push(&conn->addresses, &address);
             if(err) {
-                list_free(&tok_list);
-                free(conn->service);
+                address_free(&address);
                 vector_free(&conn->addresses);
+                free(conn->service);
+                list_free(&tok_list);
                 return CONNECTION_ENOMEM;
             }
         }
@@ -84,13 +84,12 @@ int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) 
         address_t address;
         
         err = address_parse(&address, config, DEFAULT_REDIS_PORT);
-        if(err) {
-            return CONNECTION_BAD_FORMAT;
-        }
+        if(err) return CONNECTION_BAD_FORMAT;
         
         vector_init(&conn->addresses, sizeof(address_t), (void(*)(void*))address_free);
         err = vector_push(&conn->addresses, &address);
         if(err) {
+            address_free(&address);
             vector_free(&conn->addresses);
             return CONNECTION_ENOMEM;
         }
@@ -101,6 +100,8 @@ int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) 
 int redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c) {
     int err;
     
+    conn->errstr[0] = 0;
+    
     if(conn->service) {     /* sentinel */
         err = redisSentinelConnect(&conn->addresses, conn->service, c);
         return err;
@@ -109,19 +110,17 @@ int redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c)
         address_t *redis;
         
         redis = vector_get(&conn->addresses, 0);
-        if(redis) {
-            *c = redisConnect(redis->host, redis->port);
-            if(!*c) return 1;
-            if((*c)->err) {
-                strcpy(conn->errstr, (*c)->errstr);
-                redisFree(*c);
-                *c = 0;
-                return 1;
-            }
-            return 0;
-        } else {
-            return 1;   /* logic error */
+        if(!redis) return 1;   /* logic error */
+        
+        *c = redisConnect(redis->host, redis->port);
+        if(!*c) return 1;
+        if((*c)->err) {
+            strcpy(conn->errstr, (*c)->errstr);
+            redisFree(*c);
+            *c = 0;
+            return 1;
         }
+        return 0;
     }
 }
 

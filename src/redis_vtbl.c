@@ -18,8 +18,8 @@ SQLITE_EXTENSION_INIT1
 /* A redis backed sqlite3 virtual table implementation.
  * prefix.db.table:[rowid]      = hash of the row data.
  * prefix.db.table.rowid        = sequence from which rowids are generated.
+ * prefix.db.table.index.rowid  = master index (zset) of rows in the table
  * prefix.db.table.indices      = master index (set) of indices on the table
- * prefix.db.table.index.rowid  = master index (set) of rows in the table
  * prefix.db.table.index:x      = additional set(rowid) index(s) for column x */
 
 typedef struct redis_vtbl_vtab {
@@ -162,10 +162,6 @@ static int redis_vtbl_column_spec_init(redis_vtbl_column_spec *cspec, const char
     return 0;
 }
 
-static int redis_vtbl_column_spec_cmp(const redis_vtbl_column_spec *l, const redis_vtbl_column_spec *r) {
-    return strcmp(l->name, r->name);
-}
-
 static void redis_vtbl_column_spec_free(redis_vtbl_column_spec *cspec) {
     free(cspec->name);
 }
@@ -275,7 +271,7 @@ static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
 /* argv[1]    - database name
  * argv[2]    - table name
  * argv[3]    - address of redis e.g. "127.0.0.1:6379"
- * argv[3]    - address(es) of sentinel "sentinel service-name 127.0.0.1:6379;192.168.1.1"
+ *  -or-      - address(es) of sentinel "sentinel service-name 127.0.0.1:6379;192.168.1.1"
  * argv[4]    - key prefix
  * argv[5...] - column defintions */
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const *argv, sqlite3_vtab **ppVTab, char **pzErr) {
@@ -292,13 +288,6 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
         *pzErr = sqlite3_mprintf("Bad format; Expected ip[:port] | sentinel service ip[:port] [ip[:port]...], key_prefix, column_def0, ...column_defN");
         return SQLITE_ERROR;
     }
-
-    /* Tasks:
-     * create vtab structure
-     * Parse arguments
-     * Connect to redis
-     * Declare table to sqlite
-     */
 
     const char *db_name = argv[1];
     const char *table = argv[2];
@@ -319,8 +308,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     }
     
     /* Attempt to connect to redis.
-     * Will either connect via sentinel
-     * or directly based on the configuration. */
+     * Will either connect via sentinel or directly to redis depending on the configuration. */
     err = redis_vtbl_connection_connect(&vtab->conn_spec, &vtab->c);
     if(err) {
         if(vtab->conn_spec.service) {
@@ -351,7 +339,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     for(i = 5; i < argc; ++i)
         list_push(&column, (char*)argv[i]);
     
-    /* fill column names and types */
+    /* parse column names and types */
     for(n = 0; n < column.size; ++n) {
         err = redis_vtbl_column_spec_init(&cspec, list_get(&column, n));
         if(err) {
@@ -409,6 +397,12 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
     
     vtab = (redis_vtbl_vtab*)pVTab;
     
+    /* Explanation of cost constants
+     * 10000.0  Guess at cost of full table scan
+     * 1.0      Lookup by rowid is O(1)
+     * 2500.0   Lookup by relative rowid is fairly cheap
+     * 10.0     Lookup by index incurs some lookup overhead
+     * 5000.0   Lookup by relative index requires multiple ops */
     pIndexInfo->idxNum = CURSOR_INDEX_SCAN;
     pIndexInfo->estimatedCost = 10000.0;
     
@@ -729,6 +723,10 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
     
     vtab = sqlite3_user_data(ctx);
     
+    (void)vtab; /* pending impl */
+    (void)argc; /* pending impl */
+    (void)argv; /* pending impl */
+    
     /* todo create the index 
      * Seems it may be necessary to pass some data through the context. */
     
@@ -736,7 +734,7 @@ static void redis_vtbl_func_createindex(sqlite3_context *ctx, int argc, sqlite3_
 }
 
 /*-----------------------------------------------------------------------------
- * Redis backed Virtual table cursor
+ * Redis backed virtual table cursor
  *----------------------------------------------------------------------------*/
 
 static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab) {
@@ -869,7 +867,7 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
             break;
         
         case CURSOR_INDEX_ROWID_EQ:
-            vector_push(&cursor->rows, &row_id);
+            reply = redisCommand(vtab->c, "EXISTS %s:%lld", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_GT:
             reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base, row_id);
@@ -884,7 +882,7 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
             reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
             break;
         
-        /* todo */
+        /* todo: implement indexes */
         case CURSOR_INDEX_NAMED_EQ:
             /* special */
             break;
@@ -903,9 +901,20 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
     }
 
     if(idxNum == CURSOR_INDEX_ROWID_EQ) {
+        if(!reply) return SQLITE_ERROR;
         
+        if(reply->type == REDIS_REPLY_INTEGER) {
+            if(reply->integer) vector_push(&cursor->rows, &row_id);
+            
+        } else {
+            freeReplyObject(reply);
+            return SQLITE_ERROR;
+        }
+        freeReplyObject(reply);
+           
     } else if(idxNum == CURSOR_INDEX_NAMED_EQ) {
-        
+        return SQLITE_ERROR;            /* todo implement indexes */
+    
     } else {
         if(!reply) return SQLITE_ERROR;
         
@@ -957,7 +966,6 @@ static int redis_vtbl_cursor_column(sqlite3_vtab_cursor *pCursor, sqlite3_contex
     }
     
     value = list_get(&cursor->column_data, N);
-    
     if(!value) {
         sqlite3_result_null(ctx);
         return SQLITE_OK;

@@ -30,6 +30,11 @@ typedef struct redis_vtbl_connection {
  * sentinel service-name address[:port][ address[:port]...]
  * A connection to the redis sentinel service at the given addresses. */
 int  redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config);
+
+/* Attempt to connect to the specified redis / sentinel host(s)
+ * Returns error code from redisSentinelConnect if conn->service
+ * otherwise 0 on success & nonzero on error. conn->errstr is filled if 
+ * provided by redis. */
 int  redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c);
 void redis_vtbl_connection_free(redis_vtbl_connection *conn);
 

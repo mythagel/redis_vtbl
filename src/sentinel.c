@@ -52,8 +52,7 @@ int redisSentinelConnect(vector_t *sentinels, const char *service, redisContext 
         address_t master;
         
         cs = redisConnectWithTimeout(sentinel->host, sentinel->port, tv);
-        if(!cs)
-            continue;       /* todo: Is there any point continuing if we're oom here? */
+        if(!cs) return SENTINEL_ERROR;  /* oom */
         if(cs->err) {
             redisFree(cs);
             continue;
@@ -88,8 +87,7 @@ int redisSentinelConnect(vector_t *sentinels, const char *service, redisContext 
         c = redisConnect(master.host, master.port);
         address_free(&master);
         
-        if(!c)
-            continue;       /* todo: Is there any point continuing if we're oom here? */
+        if(!c) return SENTINEL_ERROR;  /* oom */
         if(c->err) {
             redisFree(c);
             c = 0;

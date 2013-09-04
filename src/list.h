@@ -33,6 +33,7 @@ void* list_find(list_t *list, void *value, int (*cmp)(void *l, void *r));
 void  list_clear(list_t *list);
 void  list_free(list_t *list);
 
+/* list is allocated within this function */
 int   list_strtok(list_t *list, const char *text, const char *delim);
 
 #endif /* LIST_H_ */

@@ -43,8 +43,7 @@ int address_parse(address_t *addr, const char *address_spec, int default_port) {
         
         addr_len = pos - address_spec;
         ++pos;
-        if(*pos == 0)
-            return ADDRESS_BAD_FORMAT;
+        if(*pos == 0) return ADDRESS_BAD_FORMAT;
         
         errno = 0;
         port = strtol(pos, &end, 10);
