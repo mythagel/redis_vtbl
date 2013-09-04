@@ -716,6 +716,8 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
 }
 static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     int err;
+    size_t i;
+    redis_vtbl_column_spec *cspec;
     list_t replies;
     list_t expected;
     list_t expected_exec;
