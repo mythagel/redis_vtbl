@@ -38,8 +38,8 @@ So, when _should_ you use this library?
 
 Unless you were looking for something like this specifically then you probably shouldn't.
 
-Want SQL use [postgresql](http://www.postgresql.org/).
-Want KV (and then some) then use [redis](http://redis.io/).
+ * Want SQL use [postgresql](http://www.postgresql.org/).
+ * Want KV (and then some) then use [redis](http://redis.io/).
 
 
 Developed and tested on linux. May work elsewhere; patches welcome.
