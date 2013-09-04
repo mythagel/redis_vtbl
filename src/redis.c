@@ -91,3 +91,49 @@ void redis_n_replies(redisContext *c, size_t n, list_t *replies) {
     }
 }
 
+int redis_check_expected(list_t *replies, ...)
+{
+    va_list args;
+    size_t i;
+    redisReply *reply;
+    redis_reply_predicate_t pred;
+    
+    va_start(args, replies);
+    for (i = 0; i < replies->size; ++i) {
+        pred = va_arg(args, redis_reply_predicate_t);
+        reply = replies->data[i];
+        
+        if(!pred(reply)) return 1;
+    }
+    return 0;
+}
+
+int redis_check_expected_bulk(redisReply *bulk_reply, ...) {
+    va_list args;
+    size_t i;
+    redisReply *reply;
+    redis_reply_predicate_t pred;
+    
+    va_start(args, bulk_reply);
+    for (i = 0; i < bulk_reply->elements; ++i) {
+        pred = va_arg(args, redis_reply_predicate_t);
+        reply = bulk_reply->element[i];
+        
+        if(!pred(reply)) return 1;
+    }
+    return 0;
+}
+
+int redis_status_reply_p(redisReply *reply) {
+    return reply->type == REDIS_REPLY_STATUS;
+}
+int redis_status_queued_reply_p(redisReply *reply) {
+    return reply->type == REDIS_REPLY_STATUS && !strcmp(reply->str, "QUEUED");
+}
+int redis_integer_reply_p(redisReply *reply) {
+    return reply->type == REDIS_REPLY_INTEGER;
+}
+int redis_bulk_reply_p(redisReply *reply) {
+    return reply->type == REDIS_REPLY_ARRAY;
+}
+
