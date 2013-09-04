@@ -602,6 +602,7 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     for(i = 0; i < vtab->columns.size; ++i) {                                                           /* add to indexes */
         cspec = vector_get(&vtab->columns, i);
         if(!cspec->indexed) continue;
+        
         redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
         list_push(&expected, redis_status_queued_reply_p);
         list_push(&expected_exec, redis_integer_reply_p);
@@ -724,13 +725,26 @@ static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     
     redisAppendCommand(vtab->c, "MULTI");
     list_push(&expected, redis_status_reply_p);
+    
+    for(i = 0; i < vtab->columns.size; ++i) {                                           /* erase from indexes */
+        cspec = vector_get(&vtab->columns, i);
+        if(!cspec->indexed) continue;
+        /* todo */
+        /*
+        implement via EVAL
+        srem prefix.db.table.index:column_name:column_value rowid
+        if(!exists prefix.db.table.index:column_name:column_value)
+            zrem prefix.db.table.index:column_name column_value
+        */
+    }
+    
     redisAppendCommand(vtab->c, "DEL %s:%lld", vtab->key_base, row_id);                 /* erase object */
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_integer_reply_p);
     redisAppendCommand(vtab->c, "ZREM %s.index.rowid %lld", vtab->key_base, row_id);    /* erase from rowids */
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_integer_reply_p);
-    /* todo */                                                                          /* erase from indexes */
+    
     redisAppendCommand(vtab->c, "EXEC");
     list_push(&expected, redis_bulk_reply_p);
 
