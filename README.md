@@ -37,6 +37,8 @@ So, when _should_ you use this library?
 *I have no idea.*
 
 
+Developed and tested on linux. May work elsewhere; patches welcome.
+
 Example
 -------
 
