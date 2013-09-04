@@ -20,7 +20,48 @@ SQLITE_EXTENSION_INIT1
  * prefix.db.table.rowid        = sequence from which rowids are generated.
  * prefix.db.table.index.rowid  = master index (zset) of rows in the table
  * prefix.db.table.indices      = master index (set) of indices on the table
- * prefix.db.table.index:x      = additional set(rowid) index(s) for column x */
+ * prefix.db.table.index:x      = value index for column x
+ * prefix.db.table.index:x:val  = rowid map for value val in column x */
+
+/*
+Index design.
+
+prefix.db.table.indices
+column_name
+
+
+zset prefix.db.table.index:column_name
+0 value_a
+0 value_b
+0 value_c
+
+set prefix.db.table.index:column_name:value_a
+rowid1
+rowid2
+... value_b, value_c
+
+
+insert new row
+for each indexed column 'column_name'
+
+zadd prefix.db.table.index:column_name 0 column_value
+sadd prefix.db.table.index:column_name:column_value rowid
+
+delete row
+srem prefix.db.table.index:column_name:column_value rowid
+if(!exists prefix.db.table.index:column_name:column_value)
+    zrem prefix.db.table.index:column_name column_value
+
+
+update row
+srem prefix.db.table.index:column_name:old_column_value rowid
+if(!exists prefix.db.table.index:column_name:old_column_value)
+    zrem prefix.db.table.index:column_name old_column_value
+
+zadd prefix.db.table.index:column_name 0 column_value
+sadd prefix.db.table.index:column_name:column_value rowid
+
+*/
 
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
@@ -29,11 +70,7 @@ typedef struct redis_vtbl_vtab {
     redisContext *c;
     char *key_base;
     
-    /* ordered list of columns */
     vector_t columns;
-    
-    /* sorted list of indexes */
-    vector_t index;
 } redis_vtbl_vtab;
 
 static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVTab, char **pzErr);
@@ -112,6 +149,7 @@ static char* i64tos(sqlite3_int64 i) {
 typedef struct redis_vtbl_column_spec {
     char *name;
     int data_type;
+    int indexed;
 } redis_vtbl_column_spec;
 
 static int column_type_int_p(const char *data_type) {
@@ -157,6 +195,8 @@ static int redis_vtbl_column_spec_init(redis_vtbl_column_spec *cspec, const char
         else if(column_type_float_p(data_type))
             cspec->data_type = SQLITE_FLOAT;
     }
+    
+    cspec->indexed = 0;
     
     list_free(&tok_list);
     return 0;
@@ -207,40 +247,28 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     }
     
     vector_init(&vtab->columns, sizeof(redis_vtbl_column_spec), (void(*)(void*))redis_vtbl_column_spec_free);
-    vector_init(&vtab->index, sizeof(char*), free);
     
     return SQLITE_OK;
 }
 
 static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
     int err;
-    vector_t *index;
-    list_t temp_index;
+    list_t indexes;
     redisReply *reply;
-    size_t i;
-    char* str;
-    
-    index = &vtab->index;
-    vector_clear(index);
     
     /* retrieve indices from redis */
     reply = redisCommand(vtab->c, "SMEMBERS %s.indices", vtab->key_base);
     if(!reply) return 1;
     
-    list_init(&temp_index, free);
-    err = redis_reply_string_list(&temp_index, reply);
+    list_init(&indexes, free);
+    err = redis_reply_string_list(&indexes, reply);
     
-    vector_reserve(index, temp_index.size);
-    for(i = 0; i < temp_index.size; ++i) {
-        str = list_set(&temp_index, i, 0);
-        vector_push(index, &str);
-    }
-    list_free(&temp_index);
+    /* TODO update column spec to identify that these columns are indexed */
+    
+    list_free(&indexes);
     
     freeReplyObject(reply);
     if(err)  return 1;
-    
-    vector_sort(index, (int (*)(const void *, const void *))strcmp);
     return 0;
 }
 
@@ -265,7 +293,6 @@ static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
     if(vtab->c) redisFree(vtab->c);
     free(vtab->key_base);
     vector_free(&vtab->columns);
-    vector_free(&vtab->index);
 }
 
 /* argv[1]    - database name
@@ -434,18 +461,16 @@ static int redis_vtbl_bestindex(sqlite3_vtab *pVTab, sqlite3_index_info *pIndexI
             break;
         } else {
             redis_vtbl_column_spec *cspec;
-            const char *index_name;
         
             /* lookup the column by id
              * Determine if that column is indexed */
             cspec = vector_get(&vtab->columns, constraint->iColumn);
             if(!cspec) return SQLITE_ERROR;
             
-            index_name = vector_bsearch(&vtab->index, cspec->name, (int (*)(const void *, const void *))strcmp);
-            if(index_name) {
+            if(cspec->indexed) {
                 pIndexInfo->aConstraintUsage[i].argvIndex = 1;
                 pIndexInfo->estimatedCost = constraint->op == SQLITE_INDEX_CONSTRAINT_EQ ? 10.0 : 5000.0;
-                pIndexInfo->idxStr = (char*)index_name;
+                pIndexInfo->idxStr = cspec->name;
                 
                 switch(constraint->op) {
                     case SQLITE_INDEX_CONSTRAINT_EQ:
@@ -563,6 +588,12 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     list_free(&args);
     redisAppendCommand(vtab->c, "ZADD %s.index.rowid %lld %lld", vtab->key_base, row_id, row_id);       /* add to rowids */
     /* todo */                                                                                          /* add to indexes */
+    /*
+    for each indexed column {
+        zadd prefix.db.table.index:column_name 0 column_value
+        sadd prefix.db.table.index:column_name:column_value rowid
+    }
+    */
     redisAppendCommand(vtab->c, "EXEC");
     
     list_init(&replies, freeReplyObject);
