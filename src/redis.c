@@ -25,9 +25,12 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
     
     vector_reserve(vector, reply->elements);
     for(i = 0; i < reply->elements; ++i) {
-        if(reply->type == REDIS_REPLY_STRING) {
+        redisReply *element;
+        element = reply->element[i];
+        
+        if(element->type == REDIS_REPLY_STRING) {
             errno = 0;
-            n = strtoll(reply->str, &end, 10);
+            n = strtoll(element->str, &end, 10);
             if(errno || *end) {      /* out-of-range | rubbish characters */
                 continue;
             }
@@ -41,27 +44,22 @@ int redis_reply_numeric_array(vector_t *vector, redisReply *reply) {
     return 0;
 }
 
-int redis_reply_string_array(vector_t *vector, redisReply *reply) {
-    int err;
+int redis_reply_string_list(list_t *list, redisReply *reply) {
     size_t i;
-    char *str;
     
     if(reply->type != REDIS_REPLY_ARRAY)
         return 1;
     
-    vector_reserve(vector, reply->elements);
     for(i = 0; i < reply->elements; ++i) {
-        if(reply->type == REDIS_REPLY_STRING) {
+        redisReply *element;
+        element = reply->element[i];
+        
+        if(element->type == REDIS_REPLY_STRING) {
+            list_push(list, strdup(element->str));
 
-            str = strdup(reply->str);
-            if(!str) return 1;
-            
-            err = vector_push(vector, &str);
-            if(err) return 1;
-        } else if(reply->type == REDIS_REPLY_NIL) {
-            str = 0;
-            err = vector_push(vector, &str);
-            if(err) return 1;
+        } else if(element->type == REDIS_REPLY_NIL) {
+            list_push(list, 0);
+
         } else {
             return 1;
         }
