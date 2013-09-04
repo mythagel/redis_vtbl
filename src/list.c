@@ -59,6 +59,15 @@ void* list_find(list_t *list, void *value, int (*cmp)(void *l, void *r)) {
     return 0;
 }
 
+void list_clear(list_t *list) {
+    if(list->value_free) {
+        size_t i;
+        for(i = 0; i < list->size; ++i)
+            list->value_free(list->data[i]);
+    }
+    list->size = 0;
+}
+
 void list_free(list_t *list) {
     if(list->value_free) {
         size_t i;
