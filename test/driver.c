@@ -28,6 +28,44 @@ int exec(sqlite3 *db, const char* sql) {
     }
 }
 
+int quiet_exec(sqlite3 *db, const char* sql) {
+    int rc;
+    char *zErrMsg = 0;
+    
+    rc = sqlite3_exec(db, sql, NULL, NULL, &zErrMsg);
+    if( rc != SQLITE_OK ) {
+        fprintf(stderr, "-ERR %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+void perf_test(sqlite3 *db) {
+    char buf[4096];
+    unsigned int i;
+    
+    snprintf(buf, sizeof(buf), 
+    /*"CREATE VIRTUAL TABLE perf USING redis (localhost:6379, prefix,\n"*/
+    "CREATE TABLE perf (\n"
+    "   timestamp          INTEGER,\n"
+    "   idx          INTEGER\n"
+    ");\n");
+    if(exec(db, buf)) return;
+    
+    for(i = 0; i < 100000; ++i) {
+        snprintf(buf, sizeof(buf), 
+        "insert into perf "
+        "(timestamp, idx) "
+        "values (strftime('%%s','now'), %u)", i);
+        if(quiet_exec(db, buf)) return;
+    }
+    
+    exec(db, "select max(timestamp) - min(timestamp) as duration from perf");
+    exec(db, "DROP TABLE perf");
+}
+
 int main() {
     sqlite3 *db;
     char *zErrMsg = 0;
@@ -92,6 +130,9 @@ int main() {
 
     exec(db, "DELETE from test0");
     exec(db, "DELETE from test1");
+
+
+    perf_test(db);
 
 // cleanup
     exec(db, "DROP TABLE test0");

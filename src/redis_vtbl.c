@@ -388,7 +388,8 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     string_append(&s, ")");
     if(!s) return SQLITE_NOMEM;
     
-    sqlite3_declare_vtab(db, s);
+    err = sqlite3_declare_vtab(db, s);
+    if(err) return err;
     free(s);
     
     list_free(&column);
