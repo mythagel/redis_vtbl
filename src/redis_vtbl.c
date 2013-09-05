@@ -20,48 +20,8 @@ SQLITE_EXTENSION_INIT1
  * prefix.db.table.rowid        = sequence from which rowids are generated.
  * prefix.db.table.index.rowid  = master index (zset) of rows in the table
  * prefix.db.table.indices      = master index (set) of indices on the table
- * prefix.db.table.index:x      = value index for column x
+ * prefix.db.table.index:x      = value zset index for column x
  * prefix.db.table.index:x:val  = rowid map for value val in column x */
-
-/*
-Index design.
-
-prefix.db.table.indices
-column_name
-
-
-zset prefix.db.table.index:column_name
-0 value_a
-0 value_b
-0 value_c
-
-set prefix.db.table.index:column_name:value_a
-rowid1
-rowid2
-... value_b, value_c
-
-
-insert new row
-for each indexed column 'column_name'
-
-zadd prefix.db.table.index:column_name 0 column_value
-sadd prefix.db.table.index:column_name:column_value rowid
-
-delete row
-srem prefix.db.table.index:column_name:column_value rowid
-if(!exists prefix.db.table.index:column_name:column_value)
-    zrem prefix.db.table.index:column_name column_value
-
-
-update row
-srem prefix.db.table.index:column_name:old_column_value rowid
-if(!exists prefix.db.table.index:column_name:old_column_value)
-    zrem prefix.db.table.index:column_name old_column_value
-
-zadd prefix.db.table.index:column_name 0 column_value
-sadd prefix.db.table.index:column_name:column_value rowid
-
-*/
 
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
@@ -255,6 +215,9 @@ static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
     int err;
     list_t indexes;
     redisReply *reply;
+    size_t i;
+    redis_vtbl_column_spec *cspec;
+    void *indexed;
     
     /* retrieve indices from redis */
     reply = redisCommand(vtab->c, "SMEMBERS %s.indices", vtab->key_base);
@@ -262,12 +225,16 @@ static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
     
     list_init(&indexes, free);
     err = redis_reply_string_list(&indexes, reply);
+    freeReplyObject(reply);
     
-    /* TODO update column spec to identify that these columns are indexed */
+    for(i = 0; i < vtab->columns.size; ++i) {
+        cspec = vector_get(&vtab->columns, i);
+        indexed = list_find(&indexes, cspec->name, (int(*)(const void*, const void*))strcmp);
+        cspec->indexed = indexed ? 1 : 0;
+    }
     
     list_free(&indexes);
     
-    freeReplyObject(reply);
     if(err)  return 1;
     return 0;
 }
@@ -664,9 +631,44 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     redisAppendCommand(vtab->c, "MULTI");
     list_push(&expected, redis_status_reply_p);
     
-    /* HMSET key column0 value0 ...columnN valueN */                                                    /* update object */
-    list_init(&args, free);
+    list_init(&args, free);                                                                                 /* update indexes (a) */
+    list_push(&args, strdup("EVAL"));
+    list_push(&args, strdup("\
+        local key_base = ARGV[1];\n\
+        local row_id = ARGV[2];\n\
+        \n\
+        local indexed_columns = redis.call('SMEMBERS', key_base..'.indices');\n\
+        for i,column_name in ipairs(indexed_columns) do\n\
+            local column_value = redis.call('HGET', key_base..':'..row_id, column_name);\n\
+            local value_index = key_base..'.index:'..column_name..':'..column_value;\n\
+            redis.call('SREM', value_index, row_id);\n\
+            if(redis.call('EXISTS', value_index) == 0) then\n\
+                redis.call('ZREM', key_base..'.index:'..column_name, column_value);\n\
+            end\n\
+        end\n\
+        return 1;\n"));
+    list_push(&args, strdup("2"));
     
+    str = 0;
+    string_append(&str, vtab->key_base);
+    string_append(&str, ".indices");
+    list_push(&args, str);
+
+    str = 0;
+    string_append(&str, vtab->key_base);
+    string_append(&str, ":");
+    string_append(&str, i64tos(row_id));
+    list_push(&args, str);
+    
+    list_push(&args, strdup(vtab->key_base));
+    list_push(&args, strdup(i64tos(row_id)));
+    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
+    list_free(&args);
+    
+    /* HMSET key column0 value0 ...columnN valueN */                                                        /* update object */
+    list_init(&args, free);
     list_push(&args, strdup("HMSET"));
     
     str = 0;
@@ -685,7 +687,20 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_status_reply_p);
     list_free(&args);
-    /* todo */                                                                                          /* update indexes */
+    
+    for(i = 0; i < vtab->columns.size; ++i) {                                                               /* update indexes (b) */
+        cspec = vector_get(&vtab->columns, i);
+        if(!cspec->indexed) continue;
+        
+        redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        list_push(&expected, redis_status_queued_reply_p);
+        list_push(&expected_exec, redis_integer_reply_p);
+        
+        redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
+        list_push(&expected, redis_status_queued_reply_p);
+        list_push(&expected_exec, redis_integer_reply_p);
+    }
+    
     redisAppendCommand(vtab->c, "EXEC");
     list_push(&expected, redis_bulk_reply_p);
     
@@ -716,11 +731,11 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
 }
 static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     int err;
-    size_t i;
-    redis_vtbl_column_spec *cspec;
     list_t replies;
     list_t expected;
     list_t expected_exec;
+    list_t args;
+    char *str;
     
     list_init(&expected, 0);
     list_init(&expected_exec, 0);
@@ -728,17 +743,41 @@ static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     redisAppendCommand(vtab->c, "MULTI");
     list_push(&expected, redis_status_reply_p);
     
-    for(i = 0; i < vtab->columns.size; ++i) {                                           /* erase from indexes */
-        cspec = vector_get(&vtab->columns, i);
-        if(!cspec->indexed) continue;
-        /* todo */
-        /*
-        implement via EVAL
-        srem prefix.db.table.index:column_name:column_value rowid
-        if(!exists prefix.db.table.index:column_name:column_value)
-            zrem prefix.db.table.index:column_name column_value
-        */
-    }
+    list_init(&args, free);                                                                 /* erase from indexes */
+    list_push(&args, strdup("EVAL"));
+    list_push(&args, strdup("\
+        local key_base = ARGV[1];\n\
+        local row_id = ARGV[2];\n\
+        \n\
+        local indexed_columns = redis.call('SMEMBERS', key_base..'.indices');\n\
+        for i,column_name in ipairs(indexed_columns) do\n\
+            local column_value = redis.call('HGET', key_base..':'..row_id, column_name);\n\
+            local value_index = key_base..'.index:'..column_name..':'..column_value;\n\
+            redis.call('SREM', value_index, row_id);\n\
+            if(redis.call('EXISTS', value_index) == 0) then\n\
+                redis.call('ZREM', key_base..'.index:'..column_name, column_value);\n\
+            end\n\
+        end\n\
+        return 1;\n"));
+    list_push(&args, strdup("2"));
+    
+    str = 0;
+    string_append(&str, vtab->key_base);
+    string_append(&str, ".indices");
+    list_push(&args, str);
+
+    str = 0;
+    string_append(&str, vtab->key_base);
+    string_append(&str, ":");
+    string_append(&str, i64tos(row_id));
+    list_push(&args, str);
+    
+    list_push(&args, strdup(vtab->key_base));
+    list_push(&args, strdup(i64tos(row_id)));
+    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
+    list_free(&args);
     
     redisAppendCommand(vtab->c, "DEL %s:%lld", vtab->key_base, row_id);                 /* erase object */
     list_push(&expected, redis_status_queued_reply_p);
@@ -919,10 +958,14 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
     redis_vtbl_vtab *vtab;
     redis_vtbl_cursor *cursor;
     redisReply *reply;
+    
     sqlite3_int64 row_id;
+    const char *value;
     
     cursor = (redis_vtbl_cursor*)pCursor;
     vtab = cursor->vtab;
+    row_id = 0;
+    value = 0;
     
     vector_clear(&cursor->rows);
     
@@ -934,6 +977,14 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
         case CURSOR_INDEX_ROWID_LE:
             if(argc == 0) return SQLITE_ERROR;
             row_id = sqlite3_value_int64(argv[0]);
+            break;
+        case CURSOR_INDEX_NAMED_EQ:
+        case CURSOR_INDEX_NAMED_GT:
+        case CURSOR_INDEX_NAMED_LT:
+        case CURSOR_INDEX_NAMED_GE:
+        case CURSOR_INDEX_NAMED_LE:
+            if(argc == 0) return SQLITE_ERROR;
+            value = (const char*)sqlite3_value_text(argv[0]);
             break;
     }
     
@@ -958,10 +1009,11 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
             reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
             break;
         
-        /* todo: implement indexes */
         case CURSOR_INDEX_NAMED_EQ:
-            /* special */
+            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%s", vtab->key_base, idxStr, value);
             break;
+        
+        /* todo: implement indexes */
         case CURSOR_INDEX_NAMED_GT:
             reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr);
             break;
@@ -988,9 +1040,6 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
         }
         freeReplyObject(reply);
            
-    } else if(idxNum == CURSOR_INDEX_NAMED_EQ) {
-        return SQLITE_ERROR;            /* todo implement indexes */
-    
     } else {
         if(!reply) return SQLITE_ERROR;
         
