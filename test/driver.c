@@ -42,7 +42,7 @@ int quiet_exec(sqlite3 *db, const char* sql) {
     }
 }
 
-void perf_test(sqlite3 *db, int virt) {
+int perf_test(sqlite3 *db, int virt) {
     char buf[4096];
     unsigned int i;
     
@@ -61,7 +61,7 @@ void perf_test(sqlite3 *db, int virt) {
         ");\n");
 
     }
-    if(exec(db, buf)) return;
+    if(exec(db, buf)) return 1;
     
     /* level the playing field - data persists in redis even after drop table */
     exec(db, "delete from perf");
@@ -72,18 +72,20 @@ void perf_test(sqlite3 *db, int virt) {
         "insert into perf "
         "(timestamp, idx) "
         "values (strftime('%%s','now'), %u)", i);
-        if(quiet_exec(db, buf)) return;
+        if(quiet_exec(db, buf)) return 1;
     }
     
     exec(db, "select * from perf where idx = 50");
-    exec(db, "select * from perf where idx < 50");
-    exec(db, "select * from perf where idx <= 50");
+    exec(db, "select * from perf where idx < 50 limit 10");
+    exec(db, "select * from perf where idx <= 50 limit 10");
     
     if(virt)
         exec(db, "select max(timestamp) - min(timestamp) as virt_duration from perf");
     else
         exec(db, "select max(timestamp) - min(timestamp) as sql_duration from perf");
     exec(db, "DROP TABLE perf");
+    
+    return 0;
 }
 
 int main() {
@@ -154,8 +156,8 @@ int main() {
     exec(db, "DELETE from test1");
 
 
-    perf_test(db, 0);
-    perf_test(db, 1);
+    if(perf_test(db, 0)) goto error;
+    if(perf_test(db, 1)) goto error;
 
 // cleanup
     exec(db, "DROP TABLE test0");
