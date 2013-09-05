@@ -7,7 +7,7 @@ An [sqlite3](http://www.sqlite.org/) virtual table module that stores data in [r
 
 Different sqlite database instances on (potentially) different systems with the same virtual table definition transparently share their data via redis.
 
-`DROP TABLE` on any of the instances individually does not remove any data. `DELETE FROM` on the other hand will remove all data from the shared store.
+`DROP TABLE` on any of the instances individually does not remove any data. An unconstrained `DELETE FROM` (from any instance) on the other hand will remove all data from the shared store.
 
 Changes to the `CREATE TABLE` definition are minimal, consisting of syntax changes to specify the virtual table module name, and configuration to connect to redis. Column specifications are unchanged.
 
