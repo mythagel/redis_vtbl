@@ -7,7 +7,7 @@ An [sqlite3](http://www.sqlite.org/) virtual table module that stores data in [r
 
 Different sqlite database instances on (potentially) different systems with the same virtual table definition transparently share their data via redis.
 
-`DROP TABLE` on any of the instances individually does not remove any data.
+`DROP TABLE` on any of the instances individually does not remove any data. `DELETE FROM` on the other hand will remove all data from the shared store.
 
 Changes to the `CREATE TABLE` definition are minimal, consisting of syntax changes to specify the virtual table module name, and configuration to connect to redis. Column specifications are unchanged.
 
@@ -18,7 +18,7 @@ Design Notes
 ------------
 Intent: To provide a mechanism to existing sql based products to be modified to transparently share data.
 
-Note that while indexes remain unimplemented performance is subpar on any queries excepting those on the rowid.
+Note: `>` `>=` `<` `<=` ops on string indexes fall back to a full table scan.
 
 Considerations for enormous amounts of data have not been made (hence redis vs. e.g. couchdb). Goal is to provide very fast access to a bounded amount of shared runtime state via an sql api.
 
@@ -69,8 +69,9 @@ Will be stored in the following redis keys:
     prefix.db.table.rowid        = sequence from which rowids are generated.
     prefix.db.table.index.rowid  = master index (zset) of rows in the table
     
-Note: Indexes are not yet implemented.
+Index data:
 
-    prefix.db.table.indices      = master index (set) of indices on the table
-    prefix.db.table.index:{x}    = additional set(rowid) index(s) for column x
+    prefix.db.table.indices         = master index (set) of indices on the table
+    prefix.db.table.index:{x}       = value zset index for column x
+    prefix.db.table.index:{x}:{val} = rowid map for value val in column x 
 
