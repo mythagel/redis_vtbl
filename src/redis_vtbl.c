@@ -162,6 +162,10 @@ static int redis_vtbl_column_spec_init(redis_vtbl_column_spec *cspec, const char
     return 0;
 }
 
+static int redis_vtbl_column_spec_name_cmp(const char *l, const redis_vtbl_column_spec *r) {
+    return strcmp(l, r->name);
+}
+
 static void redis_vtbl_column_spec_free(redis_vtbl_column_spec *cspec) {
     free(cspec->name);
 }
@@ -985,46 +989,71 @@ static int redis_vtbl_cursor_close(sqlite3_vtab_cursor *pCursor) {
     return SQLITE_OK;
 }
 
+static int redis_vtbl_cursor_filter_scan(redis_vtbl_cursor *cursor);
+static int redis_vtbl_cursor_filter_rowid(redis_vtbl_cursor *cursor, sqlite3_int64 row_id, int idxNum);
+static int redis_vtbl_cursor_filter_index(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, sqlite3_value *value);
 static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, const char *idxStr, int argc, sqlite3_value **argv) {
     int err;
-    redis_vtbl_vtab *vtab;
     redis_vtbl_cursor *cursor;
-    redisReply *reply;
-    
     sqlite3_int64 row_id;
-    const char *value;
     
     cursor = (redis_vtbl_cursor*)pCursor;
-    vtab = cursor->vtab;
-    row_id = 0;
-    value = 0;
-    
     vector_clear(&cursor->rows);
-    
+    err = SQLITE_ERROR;
+
     switch(idxNum) {
+        case CURSOR_INDEX_SCAN:
+            err = redis_vtbl_cursor_filter_scan(cursor);
+            break;
         case CURSOR_INDEX_ROWID_EQ:
         case CURSOR_INDEX_ROWID_GT:
         case CURSOR_INDEX_ROWID_LT:
         case CURSOR_INDEX_ROWID_GE:
         case CURSOR_INDEX_ROWID_LE:
-            if(argc == 0) return SQLITE_ERROR;
+            if(argc == 0) return SQLITE_ERROR;          /* Internal error. row_id not passed after request in bestindex */
             row_id = sqlite3_value_int64(argv[0]);
+            err = redis_vtbl_cursor_filter_rowid(cursor, row_id, idxNum);
             break;
         case CURSOR_INDEX_NAMED_EQ:
         case CURSOR_INDEX_NAMED_GT:
         case CURSOR_INDEX_NAMED_LT:
         case CURSOR_INDEX_NAMED_GE:
         case CURSOR_INDEX_NAMED_LE:
-            if(argc == 0) return SQLITE_ERROR;
-            value = (const char*)sqlite3_value_text(argv[0]);
+            if(argc == 0) return SQLITE_ERROR;          /* Internal error. value not passed after request in bestindex */
+            err = redis_vtbl_cursor_filter_index(cursor, idxNum, idxStr, argv[0]);
             break;
     }
     
+    if(!err) {
+        cursor->current_row = vector_begin(&cursor->rows);
+        cursor->column_data_valid = 0;
+    }
+    return err;
+}
+static int redis_vtbl_cursor_filter_scan(redis_vtbl_cursor *cursor) {
+    int err;
+    redisReply *reply;
+    redis_vtbl_vtab *vtab;
+    
+    vtab = cursor->vtab;
+    
+    reply = redisCommand(vtab->c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
+    if(!reply) return SQLITE_ERROR;
+    
+    err = redis_reply_numeric_array(&cursor->rows, reply);
+    freeReplyObject(reply);
+    
+    if(err) return SQLITE_ERROR;
+    return SQLITE_OK;
+}
+static int redis_vtbl_cursor_filter_rowid(redis_vtbl_cursor *cursor, sqlite3_int64 row_id, int idxNum) {
+    int err;
+    redisReply *reply;
+    redis_vtbl_vtab *vtab;
+
+    vtab = cursor->vtab;
+
     switch(idxNum) {
-        case CURSOR_INDEX_SCAN:
-            reply = redisCommand(vtab->c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
-            break;
-        
         case CURSOR_INDEX_ROWID_EQ:
             reply = redisCommand(vtab->c, "EXISTS %s:%lld", vtab->key_base, row_id);
             break;
@@ -1040,29 +1069,11 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
         case CURSOR_INDEX_ROWID_LE:
             reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
             break;
-        
-        case CURSOR_INDEX_NAMED_EQ:
-            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%s", vtab->key_base, idxStr, value);
-            break;
-        
-        /* todo: implement indexes */
-        case CURSOR_INDEX_NAMED_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr);
-            break;
-        case CURSOR_INDEX_NAMED_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%lld", vtab->key_base, idxStr);
-            break;
-        case CURSOR_INDEX_NAMED_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %lld +inf", vtab->key_base, idxStr);
-            break;
-        case CURSOR_INDEX_NAMED_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %lld", vtab->key_base, idxStr);
-            break;
     }
 
+    if(!reply) return SQLITE_ERROR;
+    
     if(idxNum == CURSOR_INDEX_ROWID_EQ) {
-        if(!reply) return SQLITE_ERROR;
-        
         if(reply->type == REDIS_REPLY_INTEGER) {
             if(reply->integer) vector_push(&cursor->rows, &row_id);
             
@@ -1071,17 +1082,179 @@ static int redis_vtbl_cursor_filter(sqlite3_vtab_cursor *pCursor, int idxNum, co
             return SQLITE_ERROR;
         }
         freeReplyObject(reply);
-           
+    
     } else {
-        if(!reply) return SQLITE_ERROR;
-        
         err = redis_reply_numeric_array(&cursor->rows, reply);
         freeReplyObject(reply);
         if(err) return SQLITE_ERROR;
     }
+    
+    return SQLITE_OK;
+}
+static int redis_vtbl_cursor_filter_index_text(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, const char *value);
+static int redis_vtbl_cursor_filter_index_integer(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, sqlite3_int64 value);
+static int redis_vtbl_cursor_filter_index_float(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, double value);
+static int redis_vtbl_cursor_filter_index(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, sqlite3_value *value) {
+    int err;
+    redis_vtbl_vtab *vtab;
+    redis_vtbl_column_spec *cspec;
+    
+    vtab = cursor->vtab;
+    
+    cspec = vector_find(&vtab->columns, idxStr, (int (*)(const void *, const void *))redis_vtbl_column_spec_name_cmp);
+    if(!cspec) return SQLITE_ERROR;
 
-    cursor->current_row = vector_begin(&cursor->rows);
-    cursor->column_data_valid = 0;
+    err = SQLITE_ERROR;
+
+    switch(cspec->data_type) {
+        case SQLITE_INTEGER: {
+            sqlite3_int64 ivalue;
+            
+            ivalue = sqlite3_value_int64(value);
+            err = redis_vtbl_cursor_filter_index_integer(cursor, idxNum, idxStr, ivalue);
+            break;
+        }
+        
+        case SQLITE_TEXT: {
+            const char *cvalue;
+            
+            cvalue = (const char*)sqlite3_value_text(value);
+            err = redis_vtbl_cursor_filter_index_text(cursor, idxNum, idxStr, cvalue);
+            break;
+        }
+        
+        case SQLITE_FLOAT: {
+            double fvalue;
+            
+            fvalue = sqlite3_value_double(value);
+            err = redis_vtbl_cursor_filter_index_float(cursor, idxNum, idxStr, fvalue);
+            break;
+        }
+    }
+    
+    return err;
+}
+static int redis_vtbl_cursor_filter_index_text(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, const char *value) {
+    int err;
+    redisReply *reply;
+    redis_vtbl_vtab *vtab;
+    long long rank;
+    
+    vtab = cursor->vtab;
+    
+    reply = redisCommand(vtab->c, "ZRANK %s.index:%s %s", vtab->key_base, idxStr, value);
+    if(reply->type == REDIS_REPLY_INTEGER) {
+        rank = reply->integer;
+    
+    } else if(reply->type == REDIS_REPLY_NIL) {
+        rank = -1;
+    
+    } else {
+        freeReplyObject(reply);
+        return SQLITE_ERROR;
+    }
+    freeReplyObject(reply);
+
+    if(idxNum == CURSOR_INDEX_NAMED_EQ) {
+        if(rank == -1) return SQLITE_OK;    /* rank indicates item does not exist. */
+        reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%s", vtab->key_base, idxStr, value);
+    
+    } else if(rank == -1) {
+        /* todo fallback to a scan if the value does not exist in the index.
+         * This can be improved by determining the approximate rank of the item
+         * and then using zrange more efficiently. */
+        reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 -1", vtab->key_base, idxStr);
+    
+    } else {
+        switch(idxNum) {
+            case CURSOR_INDEX_NAMED_GT:
+                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
+                break;
+            case CURSOR_INDEX_NAMED_LT:
+                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
+                break;
+            case CURSOR_INDEX_NAMED_GE:
+                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
+                break;
+            case CURSOR_INDEX_NAMED_LE:
+                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
+                break;
+        }
+    }
+
+    if(!reply) return SQLITE_ERROR;
+
+    err = redis_reply_numeric_array(&cursor->rows, reply);
+    freeReplyObject(reply);
+    if(err) return SQLITE_ERROR;
+    
+    return SQLITE_OK;
+}
+static int redis_vtbl_cursor_filter_index_integer(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, sqlite3_int64 value) {
+    int err;
+    redisReply *reply;
+    redis_vtbl_vtab *vtab;
+    
+    vtab = cursor->vtab;
+
+    switch(idxNum) {
+        case CURSOR_INDEX_NAMED_EQ:
+            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%lld", vtab->key_base, idxStr, value);
+            break;
+        
+        case CURSOR_INDEX_NAMED_GT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_LT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%lld", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_GE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %lld +inf", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_LE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %lld", vtab->key_base, idxStr, value);
+            break;
+    }
+    
+    if(!reply) return SQLITE_ERROR;
+    
+    err = redis_reply_numeric_array(&cursor->rows, reply);
+    freeReplyObject(reply);
+    if(err) return SQLITE_ERROR;
+    
+    return SQLITE_OK;
+}
+static int redis_vtbl_cursor_filter_index_float(redis_vtbl_cursor *cursor, int idxNum, const char *idxStr, double value) {
+    int err;
+    redisReply *reply;
+    redis_vtbl_vtab *vtab;
+    
+    vtab = cursor->vtab;
+
+    switch(idxNum) {
+        case CURSOR_INDEX_NAMED_EQ:
+            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%f", vtab->key_base, idxStr, value);
+            break;
+        
+        case CURSOR_INDEX_NAMED_GT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%f +inf", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_LT:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%f", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_GE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %f +inf", vtab->key_base, idxStr, value);
+            break;
+        case CURSOR_INDEX_NAMED_LE:
+            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %f", vtab->key_base, idxStr, value);
+            break;
+    }
+    
+    if(!reply) return SQLITE_ERROR;
+    
+    err = redis_reply_numeric_array(&cursor->rows, reply);
+    freeReplyObject(reply);
+    if(err) return SQLITE_ERROR;
     
     return SQLITE_OK;
 }
