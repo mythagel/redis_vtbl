@@ -570,9 +570,25 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
         cspec = vector_get(&vtab->columns, i);
         if(!cspec->indexed) continue;
         
-        redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
-        list_push(&expected, redis_status_queued_reply_p);
-        list_push(&expected_exec, redis_integer_reply_p);
+        if(cspec->data_type == SQLITE_INTEGER) {
+            sqlite3_int64 value;
+            value = sqlite3_value_int64(argv[2 + i]);
+            
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s %lld %lld", vtab->key_base, cspec->name, value, value);
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        } else if(cspec->data_type == SQLITE_FLOAT) {
+            double value;
+            value = sqlite3_value_double(argv[2 + i]);
+            
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s %f %f", vtab->key_base, cspec->name, value, value);
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        } else {
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        }
         
         redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
         list_push(&expected, redis_status_queued_reply_p);
@@ -692,9 +708,25 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
         cspec = vector_get(&vtab->columns, i);
         if(!cspec->indexed) continue;
         
-        redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
-        list_push(&expected, redis_status_queued_reply_p);
-        list_push(&expected_exec, redis_integer_reply_p);
+        if(cspec->data_type == SQLITE_INTEGER) {
+            sqlite3_int64 value;
+            value = sqlite3_value_int64(argv[2 + i]);
+            
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s %lld %lld", vtab->key_base, cspec->name, value, value);
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        } else if(cspec->data_type == SQLITE_FLOAT) {
+            double value;
+            value = sqlite3_value_double(argv[2 + i]);
+            
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s %f %f", vtab->key_base, cspec->name, value, value);
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        } else {
+            redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+            list_push(&expected, redis_status_queued_reply_p);
+            list_push(&expected_exec, redis_integer_reply_p);
+        }
         
         redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
         list_push(&expected, redis_status_queued_reply_p);
