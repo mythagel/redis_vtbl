@@ -67,12 +67,12 @@ int vector_push(vector_t *vector, void *value) {
     return VECTOR_OK;
 }
 
-void* vector_find(vector_t *vector, void *value, int (*cmp)(const void *l, const void *r)) {
+void* vector_find(vector_t *vector, const void *value, int (*cmp)(const void *l, const void *r)) {
     size_t index;
     for(index = 0; index < vector->size; ++index) {
-        void *lvalue = vector_get(vector, index);
-        if(cmp(lvalue, value) == 0)
-            return lvalue;
+        void *rvalue = vector_get(vector, index);
+        if(cmp(value, rvalue) == 0)
+            return rvalue;
     }
     return 0;
 }
