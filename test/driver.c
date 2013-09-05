@@ -67,13 +67,15 @@ void perf_test(sqlite3 *db, int virt) {
     exec(db, "delete from perf");
     
     
-    for(i = 0; i < 100000; ++i) {
+    for(i = 0; i < 100; ++i) {
         snprintf(buf, sizeof(buf), 
         "insert into perf "
         "(timestamp, idx) "
         "values (strftime('%%s','now'), %u)", i);
         if(quiet_exec(db, buf)) return;
     }
+    
+    exec(db, "select * from perf where idx = 50");
     
     if(virt)
         exec(db, "select max(timestamp) - min(timestamp) as virt_duration from perf");
