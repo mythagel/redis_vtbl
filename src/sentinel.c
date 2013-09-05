@@ -51,30 +51,52 @@ int redisSentinelConnect(vector_t *sentinels, const char *service, redisContext 
         redisContext *cs = 0;
         address_t master;
         
+#ifndef QUIET
+        fprintf(stderr, "redis_vtbl: Connecting to sentinel %s:%d... ", sentinel->host, sentinel->port);
+#endif
         cs = redisConnectWithTimeout(sentinel->host, sentinel->port, tv);
         if(!cs) return SENTINEL_ERROR;  /* oom */
         if(cs->err) {
+#ifndef QUIET
+            fprintf(stderr, "-NOK %s\n", cs->errstr);
+#endif
             redisFree(cs);
             continue;
         }
+#ifndef QUIET
+        fprintf(stderr, "+OK\n");
+#endif
         
         err = redisSentinelGetMasterAddress(cs, service, &master);
         if(err) {
             switch(err) {
                 case SENTINEL_ERROR:
+#ifndef QUIET
+                    fprintf(stderr, "redis_vtbl: Error; Next sentinel.\n");
+#endif
                     break;
                 
                 case SENTINEL_MASTER_NAME_UNKNOWN:
+#ifndef QUIET
+                    fprintf(stderr, "redis_vtbl: Master name unknown; Next sentinel.\n");
+#endif
                     ++name_unknown;
                     break;
                 
                 case SENTINEL_MASTER_UNKNOWN:
+#ifndef QUIET
+                    fprintf(stderr, "redis_vtbl: Master unknown; Next sentinel.\n");
+#endif
                     ++master_unknown;
                     break;
             }
             redisFree(cs);
             continue;
         }
+        
+#ifndef QUIET
+        fprintf(stderr, "redis_vtbl: Found master %s:%d... ", master.host, master.port);
+#endif
         
         /* Refresh the sentinel list from the answering sentinel.
          * This is safe because it only appends to the end of the list
@@ -147,6 +169,10 @@ static int redisSentinelRefreshSentinelList(redisContext *cs, const char *servic
                 
                 err = address_parse(&sentinel, reply->str, DEFAULT_REDIS_PORT);
                 if(err) continue;
+                
+#ifndef QUIET
+                fprintf(stderr, "redis_vtbl: Discovered seninel %s:%d... ", sentinel.host, sentinel.port);
+#endif
                 
                 exists = vector_find(sentinels, &sentinel, (int (*)(const void *, const void *))address_cmp);
                 

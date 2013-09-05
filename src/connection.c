@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const char* trim_ws(const char *str) {
     while(*str && isspace(*str))
@@ -112,14 +113,23 @@ int redis_vtbl_connection_connect(redis_vtbl_connection *conn, redisContext **c)
         redis = vector_get(&conn->addresses, 0);
         if(!redis) return 1;   /* logic error */
         
+#ifndef QUIET
+        fprintf(stderr, "redis_vtbl: Connecting to redis %s:%d... ", redis->host, redis->port);
+#endif
         *c = redisConnect(redis->host, redis->port);
         if(!*c) return 1;
         if((*c)->err) {
+#ifndef QUIET
+            fprintf(stderr, "-NOK %s\n", conn->errstr);
+#endif
             strcpy(conn->errstr, (*c)->errstr);
             redisFree(*c);
             *c = 0;
             return 1;
         }
+#ifndef QUIET
+        fprintf(stderr, "+OK\n");
+#endif
         return 0;
     }
 }
