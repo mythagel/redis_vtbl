@@ -478,6 +478,9 @@ static int redis_vtbl_findfunction(sqlite3_vtab *pVtab, int nArg, const char *zN
         return 1;
     }
     
+    /* todo overload other functions to improve performance.
+     * min and max are simple examples that atm require a table scan. */
+    
     return 0;
 }
 
@@ -658,7 +661,7 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
         local row_id = ARGV[2];\n\
         \n\
         local indexed_columns = redis.call('SMEMBERS', key_base..'.indices');\n\
-        for i,column_name in ipairs(indexed_columns) do\n\
+        for _,column_name in ipairs(indexed_columns) do\n\
             local column_value = redis.call('HGET', key_base..':'..row_id, column_name);\n\
             local value_index = key_base..'.index:'..column_name..':'..column_value;\n\
             redis.call('SREM', value_index, row_id);\n\
@@ -786,7 +789,7 @@ static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
         local row_id = ARGV[2];\n\
         \n\
         local indexed_columns = redis.call('SMEMBERS', key_base..'.indices');\n\
-        for i,column_name in ipairs(indexed_columns) do\n\
+        for _,column_name in ipairs(indexed_columns) do\n\
             local column_value = redis.call('HGET', key_base..':'..row_id, column_name);\n\
             local value_index = key_base..'.index:'..column_name..':'..column_value;\n\
             redis.call('SREM', value_index, row_id);\n\
