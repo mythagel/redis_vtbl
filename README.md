@@ -11,7 +11,7 @@ Different sqlite database instances on (potentially) different systems with the 
 
 Changes to the `CREATE TABLE` definition are minimal, consisting of syntax changes to specify the virtual table module name, and configuration to connect to redis. Column specifications are unchanged.
 
-Redis connection specification can either be a single redis instance, or (untested) a list of sentinel addresses and a service name from which to determine the active redis master.
+Redis connection specification can either be a single redis instance, or (not fully verified) a list of sentinel addresses and a service name from which to determine the active redis master.
 
 
 Design Notes
