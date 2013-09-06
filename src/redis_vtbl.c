@@ -902,6 +902,16 @@ static int redis_vtbl_cursor_init(redis_vtbl_cursor *cur, redis_vtbl_vtab *vtab)
     return SQLITE_OK;
 }
 
+/*
+Thoughts for cursor get:
+It would be good to retrieve batched row data.
+i.e. first get retrieves one row
+next 2
+next 4, etc (n * 1.618)
+
+Additionally it would be good to not retrieve the entire row,
+but only the subset of columns that are going to be requested.
+*/
 /* retrieve column_data for current_row */
 static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     int err;
