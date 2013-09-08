@@ -26,7 +26,7 @@ SQLITE_EXTENSION_INIT1
 typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
     
-    redis_vtbl_connection conn_spec;
+    redis_vtbl_connection conn;
     redisContext *c;
     char *key_base;
     
@@ -185,7 +185,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     
     memset(&vtab->base, 0, sizeof(sqlite3_vtab));
     
-    err = redis_vtbl_connection_init(&vtab->conn_spec, conn_config);
+    err = redis_vtbl_connection_init(&vtab->conn, conn_config);
     if(err) {
         switch(err) {
             case CONNECTION_BAD_FORMAT:
@@ -206,7 +206,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
     string_append(&vtab->key_base, table);
     
     if(!vtab->key_base) {
-        redis_vtbl_connection_free(&vtab->conn_spec);
+        redis_vtbl_connection_free(&vtab->conn);
         return SQLITE_NOMEM;
     }
     
@@ -260,8 +260,7 @@ static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *
 }
 
 static void redis_vtbl_vtab_free(redis_vtbl_vtab *vtab) {
-    redis_vtbl_connection_free(&vtab->conn_spec);
-    if(vtab->c) redisFree(vtab->c);
+    redis_vtbl_connection_free(&vtab->conn);
     free(vtab->key_base);
     vector_free(&vtab->columns);
 }
@@ -307,9 +306,9 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     
     /* Attempt to connect to redis.
      * Will either connect via sentinel or directly to redis depending on the configuration. */
-    err = redis_vtbl_connection_connect(&vtab->conn_spec, &vtab->c);
+    err = redis_vtbl_connection_connect(&vtab->conn);
     if(err) {
-        if(vtab->conn_spec.service) {
+        if(vtab->conn.service) {
             switch(err) {
                 case SENTINEL_ERROR:
                     *pzErr = sqlite3_mprintf("Sentinel: Unknown error.");
@@ -325,13 +324,16 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
                     break;
             }
         } else {
-            *pzErr = sqlite3_mprintf("Redis: %s", vtab->conn_spec.errstr);
+            *pzErr = sqlite3_mprintf("Redis: %s", vtab->conn.errstr);
         }
         
         redis_vtbl_vtab_free(vtab);
         free(vtab);
         return SQLITE_ERROR;
     }
+    
+    // todo temporary stub while redoing command generation.
+    vtab->c = vtab->conn.c;
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
