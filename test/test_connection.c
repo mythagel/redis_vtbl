@@ -26,8 +26,7 @@ int main() {
         return 1;
     }
     
-    redisContext *c;
-    err = redis_vtbl_connection_connect(&conn, &c);
+    err = redis_vtbl_connection_connect(&conn);
     if(err) {
         printf("Unable to connect to redis.\n");
         redis_vtbl_connection_free(&conn);
@@ -35,8 +34,6 @@ int main() {
     } else {
         printf("connected to redis.\n");
     }
-    redisFree(c);
-    
     redis_vtbl_connection_free(&conn);
     
     return 0;
