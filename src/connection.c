@@ -9,6 +9,7 @@
 #include "sentinel.h"
 #include "list.h"
 #include "address.h"
+#include "redis.h"
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,7 +25,20 @@ int redis_vtbl_command_init(redis_vtbl_command *cmd) {
     list_init(&cmd->args, free);
     return CONNECTION_OK;
 }
-int redis_vtbl_command_append(redis_vtbl_command *cmd, const char *arg) {
+int redis_vtbl_command_init_arg(redis_vtbl_command *cmd, const char *arg) {
+	int err;
+	
+	err = redis_vtbl_command_init(cmd);
+	if(err) return err;
+	
+	err = redis_vtbl_command_arg(cmd, arg);
+	if(err) {
+		redis_vtbl_command_free(cmd);
+		return err;
+	}
+	return CONNECTION_OK;
+}
+int redis_vtbl_command_arg(redis_vtbl_command *cmd, const char *arg) {
     int err;
     char *str;
     str = strdup(arg);
@@ -36,19 +50,19 @@ int redis_vtbl_command_append(redis_vtbl_command *cmd, const char *arg) {
     }
     return CONNECTION_OK;
 }
-int redis_vtbl_command_append_fmt(redis_vtbl_command *cmd, const char *fmt, ...) {
+int redis_vtbl_command_arg_fmt(redis_vtbl_command *cmd, const char *arg, ...) {
     int err;
     char *str;
     va_list args;
     size_t size;
     
-    size = strlen(fmt) * 1.618;
+    size = strlen(arg) * 10.618;
     str = malloc(size);
     if(!str) return CONNECTION_ENOMEM;
     
-    va_start(args, fmt);
+    va_start(args, arg);
     
-    err = vsnprintf(str, size, fmt, args);
+    err = vsnprintf(str, size, arg, args);
     if(err < 0) {
         free(str);
         va_end(args);
@@ -57,7 +71,7 @@ int redis_vtbl_command_append_fmt(redis_vtbl_command *cmd, const char *fmt, ...)
     
     if((unsigned)err >= size) {
         char *s;
-        
+        // TODO BROKEN!!
         size = err+1;
         s = realloc(str, size);
         if(!s) {
@@ -67,7 +81,7 @@ int redis_vtbl_command_append_fmt(redis_vtbl_command *cmd, const char *fmt, ...)
         }
         str = s;
         
-        err = vsnprintf(str, size, fmt, args);
+        err = vsnprintf(str, size, arg, args);
         if(err < 0) {
             free(str);
             va_end(args);
@@ -104,6 +118,7 @@ int redis_vtbl_connection_init(redis_vtbl_connection *conn, const char *config) 
     conn->service = 0;
     conn->errstr[0] = 0;
     conn->c = 0;
+    conn->queued_commands = 0;
     
     /* Validate format:
      * sentinel service-name address[:port][; address[:port]...] */
@@ -211,13 +226,23 @@ redisReply* redis_vtbl_connection_command(redis_vtbl_connection *conn, redis_vtb
     return reply;
 }
 
-int redis_vtbl_connection_command_enqueue(redis_vtbl_connection *conn, redis_vtbl_command *cmd) {
-    // todo
+void redis_vtbl_connection_command_enqueue(redis_vtbl_connection *conn, redis_vtbl_command *cmd) {
+    redisAppendCommandArgv(conn->c, cmd->args.size, (const char**)cmd->args.data, 0);
+    redis_vtbl_command_free(cmd);
+    ++conn->queued_commands;
+}
+
+int  redis_vtbl_connection_read_queued(redis_vtbl_connection *conn, list_t *replies) {
+	if(conn->queued_commands == 0) return CONNECTION_ERROR;
+	
+	redis_n_replies(conn->c, conn->queued_commands, replies);
+	conn->queued_commands = 0;
+	return CONNECTION_OK;
 }
 
 void redis_vtbl_connection_free(redis_vtbl_connection *conn) {
     free(conn->service);
     vector_free(&conn->addresses);
-    redisFree(conn->c);
+    if(conn->c) redisFree(conn->c);
 }
 

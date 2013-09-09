@@ -23,6 +23,7 @@ typedef struct redis_vtbl_connection {
     vector_t addresses;             /* list of redis/sentinel addresses */
     char errstr[128];               /* error string from redis */
     redisContext *c;
+    size_t queued_commands;
 } redis_vtbl_connection;
 
 typedef struct redis_vtbl_command {
@@ -30,8 +31,9 @@ typedef struct redis_vtbl_command {
 } redis_vtbl_command;
 
 int  redis_vtbl_command_init(redis_vtbl_command *cmd);
-int  redis_vtbl_command_append(redis_vtbl_command *cmd, const char *arg);
-int  redis_vtbl_command_append_fmt(redis_vtbl_command *cmd, const char *fmt, ...);
+int  redis_vtbl_command_init_arg(redis_vtbl_command *cmd, const char *arg);
+int  redis_vtbl_command_arg(redis_vtbl_command *cmd, const char *arg);
+int  redis_vtbl_command_arg_fmt(redis_vtbl_command *cmd, const char *arg, ...);
 void redis_vtbl_command_free(redis_vtbl_command *cmd);
 
 /* Initialise a new connection object from the given configuration.
@@ -51,7 +53,8 @@ int  redis_vtbl_connection_connect(redis_vtbl_connection *conn);
 
 /* both of these commands take ownership of the cmd object */
 redisReply* redis_vtbl_connection_command(redis_vtbl_connection *conn, redis_vtbl_command *cmd);
-int  redis_vtbl_connection_command_enqueue(redis_vtbl_connection *conn, redis_vtbl_command *cmd);
+void redis_vtbl_connection_command_enqueue(redis_vtbl_connection *conn, redis_vtbl_command *cmd);
+int  redis_vtbl_connection_read_queued(redis_vtbl_connection *conn, list_t *replies);
 
 void redis_vtbl_connection_free(redis_vtbl_connection *conn);
 
