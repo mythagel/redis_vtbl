@@ -27,7 +27,7 @@ typedef struct redis_vtbl_vtab {
     sqlite3_vtab base;
     
     redis_vtbl_connection conn;
-    redisContext *c;
+    //redisContext *c;
     char *key_base;
     
     vector_t columns;
@@ -93,13 +93,6 @@ static int string_append(char** str, const char* src) {
     strcpy(s + str_sz, src);
     s[str_sz+src_sz] = 0;
     return 0;
-}
-
-#define MAXI64STRLEN ((CHAR_BIT * sizeof(sqlite3_int64) - 1) / 3 + 2)
-static char* i64tos(sqlite3_int64 i) {
-    static char buf[MAXI64STRLEN];           /* not thread safe nor reentrant */
-    snprintf(buf, MAXI64STRLEN, "%lld", i);
-    return buf;
 }
 
 /*-----------------------------------------------------------------------------
@@ -196,7 +189,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
         }
     }
     
-    vtab->c = 0;
+    //vtab->c = 0;
     vtab->key_base = 0;
     
     string_append(&vtab->key_base, prefix);
@@ -217,6 +210,7 @@ static int redis_vtbl_vtab_init(redis_vtbl_vtab *vtab, const char *conn_config, 
 
 static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
     int err;
+    redis_vtbl_command cmd;
     list_t indexes;
     redisReply *reply;
     size_t i;
@@ -224,7 +218,9 @@ static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
     void *indexed;
     
     /* retrieve indices from redis */
-    reply = redisCommand(vtab->c, "SMEMBERS %s.indices", vtab->key_base);
+    redis_vtbl_command_init_arg(&cmd, "SMEMBERS");
+    redis_vtbl_command_arg_fmt(&cmd, "%s.indices", vtab->key_base);
+    reply = redis_vtbl_connection_command(&vtab->conn, &cmd);
     if(!reply) return 1;
     
     list_init(&indexes, free);
@@ -244,9 +240,12 @@ static int redis_vtbl_vtab_update_indices(redis_vtbl_vtab *vtab) {
 }
 
 static int redis_vtbl_vtab_generate_rowid(redis_vtbl_vtab *vtab, sqlite3_int64 *rowid) {
+	redis_vtbl_command cmd;
     redisReply *reply;
     
-    reply = redisCommand(vtab->c, "INCR %s.rowid", vtab->key_base);
+    redis_vtbl_command_init_arg(&cmd, "INCR");
+    redis_vtbl_command_arg_fmt(&cmd, "%s.rowid", vtab->key_base);
+    reply = redis_vtbl_connection_command(&vtab->conn, &cmd);
     if(!reply) return 1;
     
     if(reply->type != REDIS_REPLY_INTEGER) {
@@ -333,7 +332,7 @@ static int redis_vtbl_create(sqlite3 *db, void *pAux, int argc, const char *cons
     }
     
     // todo temporary stub while redoing command generation.
-    vtab->c = vtab->conn.c;
+    //vtab->c = vtab->conn.c;
     
     list_init(&column, 0);
     for(i = 5; i < argc; ++i)
@@ -519,10 +518,9 @@ static int redis_vtbl_update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv
 static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value **argv, sqlite3_int64 *pRowid) {
     int err;
     sqlite3_int64 row_id;
-    list_t args;
-    char *str;
     size_t i;
     redis_vtbl_column_spec *cspec;
+    redis_vtbl_command cmd;
     list_t replies;
     list_t expected;
     list_t expected_exec;
@@ -546,35 +544,30 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     list_init(&expected, 0);
     list_init(&expected_exec, 0);
     
-    redisAppendCommand(vtab->c, "MULTI");
+    redis_vtbl_command_init_arg(&cmd, "MULTI");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_reply_p);
     
     /* HMSET key column0 value0 ...columnN valueN */                                                    /* create object */
-    list_init(&args, free);
-    
-    list_push(&args, strdup("HMSET"));
-    
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ":");
-    string_append(&str, i64tos(row_id));
-    list_push(&args, str);
-    
+    redis_vtbl_command_init_arg(&cmd, "HMSET");
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
     for(i = 0; i < vtab->columns.size; ++i) {
         cspec = vector_get(&vtab->columns, i);
-        list_push(&args, strdup(cspec->name));
-        list_push(&args, strdup((const char*)sqlite3_value_text(argv[2 + i])));
+        redis_vtbl_command_arg(&cmd, cspec->name);
+        redis_vtbl_command_arg(&cmd, (const char*)sqlite3_value_text(argv[2 + i]));
     }
-    
-    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_status_reply_p);
-    list_free(&args);
-    
-    redisAppendCommand(vtab->c, "ZADD %s.index.rowid %lld %lld", vtab->key_base, row_id, row_id);       /* add to rowids */
+
+    redis_vtbl_command_init_arg(&cmd, "ZADD");       													/* add to rowids */
+    redis_vtbl_command_arg_fmt(&cmd, "%s.index.rowid", vtab->key_base);
+    redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+    redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_integer_reply_p);
-    
+        
     for(i = 0; i < vtab->columns.size; ++i) {                                                           /* add to indexes */
         cspec = vector_get(&vtab->columns, i);
         if(!cspec->indexed) continue;
@@ -583,32 +576,51 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
             sqlite3_int64 value;
             value = sqlite3_value_int64(argv[2 + i]);
             
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s %lld %lld", vtab->key_base, cspec->name, value, value);
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg_fmt(&cmd, "%lld", value);
+		    redis_vtbl_command_arg_fmt(&cmd, "%lld", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         } else if(cspec->data_type == SQLITE_FLOAT) {
             double value;
             value = sqlite3_value_double(argv[2 + i]);
-            
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s %f %f", vtab->key_base, cspec->name, value, value);
+
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg_fmt(&cmd, "%f", value);
+		    redis_vtbl_command_arg_fmt(&cmd, "%f", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         } else {
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        	const char *value;
+        	value = (const char*)sqlite3_value_text(argv[2 + i]);
+        	
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg(&cmd, "0");
+		    redis_vtbl_command_arg_fmt(&cmd, "%s", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         }
         
-        redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
+        redis_vtbl_command_init_arg(&cmd, "SADD");
+        redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s:%s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+        redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
         list_push(&expected, redis_status_queued_reply_p);
         list_push(&expected_exec, redis_integer_reply_p);
     }
     
-    redisAppendCommand(vtab->c, "EXEC");
+    redis_vtbl_command_init_arg(&cmd, "EXEC");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_bulk_reply_p);
     
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, expected.size, &replies);
+    redis_vtbl_connection_read_queued(&vtab->conn, &replies);
     
     err = redis_check_expected_list(&replies, &expected);
     list_free(&expected);
@@ -635,10 +647,9 @@ static int redis_vtbl_exec_insert(redis_vtbl_vtab *vtab, int argc, sqlite3_value
 static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value **argv) {
     int err;
     sqlite3_int64 row_id;
-    list_t args;
-    char *str;
     size_t i;
     redis_vtbl_column_spec *cspec;
+    redis_vtbl_command cmd;
     list_t replies;
     list_t expected;
     list_t expected_exec;
@@ -651,14 +662,17 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
     list_init(&expected_exec, 0);
     
     row_id = sqlite3_value_int64(argv[0]);
-    redisAppendCommand(vtab->c, "WATCH %s:%lld", vtab->key_base, row_id);                               /* WATCH key */
-    list_push(&expected, redis_status_reply_p);
-    redisAppendCommand(vtab->c, "MULTI");
+    redis_vtbl_command_init_arg(&cmd, "WATCH");                               /* WATCH key */
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_reply_p);
     
-    list_init(&args, free);                                                                                 /* update indexes (a) */
-    list_push(&args, strdup("EVAL"));
-    list_push(&args, strdup("\
+    redis_vtbl_command_init_arg(&cmd, "MULTI");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
+    list_push(&expected, redis_status_reply_p);
+    
+	redis_vtbl_command_init_arg(&cmd, "EVAL");                                                                                 /* update indexes (a) */
+    redis_vtbl_command_arg(&cmd, "\
         local key_base = ARGV[1];\n\
         local row_id = ARGV[2];\n\
         \n\
@@ -671,47 +685,28 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
                 redis.call('ZREM', key_base..'.index:'..column_name, column_value);\n\
             end\n\
         end\n\
-        return 1;\n"));
-    list_push(&args, strdup("2"));
-    
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ".indices");
-    list_push(&args, str);
-
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ":");
-    string_append(&str, i64tos(row_id));
-    list_push(&args, str);
-    
-    list_push(&args, strdup(vtab->key_base));
-    list_push(&args, strdup(i64tos(row_id)));
-    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+        return 1;\n");
+    redis_vtbl_command_arg(&cmd, "2");
+    redis_vtbl_command_arg_fmt(&cmd, "%s.indices", vtab->key_base);
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
+	redis_vtbl_command_arg(&cmd, vtab->key_base);
+	redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_integer_reply_p);
-    list_free(&args);
     
     /* HMSET key column0 value0 ...columnN valueN */                                                        /* update object */
-    list_init(&args, free);
-    list_push(&args, strdup("HMSET"));
-    
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ":");
-    string_append(&str, i64tos(row_id));
-    list_push(&args, str);
+    redis_vtbl_command_init_arg(&cmd, "HMSET");
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
     
     for(i = 0; i < vtab->columns.size; ++i) {
         cspec = vector_get(&vtab->columns, i);
-        list_push(&args, strdup(cspec->name));
-        list_push(&args, strdup((const char*)sqlite3_value_text(argv[2 + i])));
+        redis_vtbl_command_arg(&cmd, cspec->name);
+        redis_vtbl_command_arg(&cmd, (const char*)sqlite3_value_text(argv[2 + i]));
     }
-    
-    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_status_reply_p);
-    list_free(&args);
     
     for(i = 0; i < vtab->columns.size; ++i) {                                                               /* update indexes (b) */
         cspec = vector_get(&vtab->columns, i);
@@ -721,32 +716,51 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
             sqlite3_int64 value;
             value = sqlite3_value_int64(argv[2 + i]);
             
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s %lld %lld", vtab->key_base, cspec->name, value, value);
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg_fmt(&cmd, "%lld", value);
+		    redis_vtbl_command_arg_fmt(&cmd, "%lld", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         } else if(cspec->data_type == SQLITE_FLOAT) {
             double value;
             value = sqlite3_value_double(argv[2 + i]);
-            
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s %f %f", vtab->key_base, cspec->name, value, value);
+
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg_fmt(&cmd, "%f", value);
+		    redis_vtbl_command_arg_fmt(&cmd, "%f", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         } else {
-            redisAppendCommand(vtab->c, "ZADD %s.index:%s 0 %s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        	const char *value;
+        	value = (const char*)sqlite3_value_text(argv[2 + i]);
+        	
+            redis_vtbl_command_init_arg(&cmd, "ZADD");
+            redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s", vtab->key_base, cspec->name);
+            redis_vtbl_command_arg(&cmd, "0");
+		    redis_vtbl_command_arg_fmt(&cmd, "%s", value);
+            redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
             list_push(&expected, redis_status_queued_reply_p);
             list_push(&expected_exec, redis_integer_reply_p);
         }
         
-        redisAppendCommand(vtab->c, "SADD %s.index:%s:%s %lld", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]), row_id);
+        redis_vtbl_command_init_arg(&cmd, "SADD");
+        redis_vtbl_command_arg_fmt(&cmd, "%s.index:%s:%s", vtab->key_base, cspec->name, (const char*)sqlite3_value_text(argv[2 + i]));
+        redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+        redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
         list_push(&expected, redis_status_queued_reply_p);
         list_push(&expected_exec, redis_integer_reply_p);
     }
     
-    redisAppendCommand(vtab->c, "EXEC");
+    redis_vtbl_command_init_arg(&cmd, "EXEC");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_bulk_reply_p);
     
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, expected.size, &replies);
+    redis_vtbl_connection_read_queued(&vtab->conn, &replies);
     
     err = redis_check_expected_list(&replies, &expected);
     list_free(&expected);
@@ -772,21 +786,20 @@ static int redis_vtbl_exec_update(redis_vtbl_vtab *vtab, int argc, sqlite3_value
 }
 static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
     int err;
+    redis_vtbl_command cmd;
     list_t replies;
     list_t expected;
     list_t expected_exec;
-    list_t args;
-    char *str;
     
     list_init(&expected, 0);
     list_init(&expected_exec, 0);
     
-    redisAppendCommand(vtab->c, "MULTI");
+    redis_vtbl_command_init_arg(&cmd, "MULTI");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_reply_p);
     
-    list_init(&args, free);                                                                 /* erase from indexes */
-    list_push(&args, strdup("EVAL"));
-    list_push(&args, strdup("\
+	redis_vtbl_command_init_arg(&cmd, "EVAL");                                                                 /* erase from indexes */
+    redis_vtbl_command_arg(&cmd, "\
         local key_base = ARGV[1];\n\
         local row_id = ARGV[2];\n\
         \n\
@@ -799,39 +812,35 @@ static int redis_vtbl_exec_delete(redis_vtbl_vtab *vtab, sqlite3_int64 row_id) {
                 redis.call('ZREM', key_base..'.index:'..column_name, column_value);\n\
             end\n\
         end\n\
-        return 1;\n"));
-    list_push(&args, strdup("2"));
-    
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ".indices");
-    list_push(&args, str);
-
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ":");
-    string_append(&str, i64tos(row_id));
-    list_push(&args, str);
-    
-    list_push(&args, strdup(vtab->key_base));
-    list_push(&args, strdup(i64tos(row_id)));
-    redisAppendCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
-    list_push(&expected, redis_status_queued_reply_p);
-    list_push(&expected_exec, redis_integer_reply_p);
-    list_free(&args);
-    
-    redisAppendCommand(vtab->c, "DEL %s:%lld", vtab->key_base, row_id);                 /* erase object */
-    list_push(&expected, redis_status_queued_reply_p);
-    list_push(&expected_exec, redis_integer_reply_p);
-    redisAppendCommand(vtab->c, "ZREM %s.index.rowid %lld", vtab->key_base, row_id);    /* erase from rowids */
+        return 1;\n");
+    redis_vtbl_command_arg(&cmd, "2");
+    redis_vtbl_command_arg_fmt(&cmd, "%s.indices", vtab->key_base);
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
+	redis_vtbl_command_arg(&cmd, vtab->key_base);
+	redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_status_queued_reply_p);
     list_push(&expected_exec, redis_integer_reply_p);
     
-    redisAppendCommand(vtab->c, "EXEC");
+    redis_vtbl_command_init_arg(&cmd, "DEL");                 /* erase object */
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
+    
+    redis_vtbl_command_init_arg(&cmd, "ZREM");    			/* erase from rowids */
+    redis_vtbl_command_arg_fmt(&cmd, "%s.index.rowid", vtab->key_base);
+    redis_vtbl_command_arg_fmt(&cmd, "%lld", row_id);
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
+    list_push(&expected, redis_status_queued_reply_p);
+    list_push(&expected_exec, redis_integer_reply_p);
+    
+    redis_vtbl_command_init_arg(&cmd, "EXEC");
+    redis_vtbl_connection_command_enqueue(&vtab->conn, &cmd);
     list_push(&expected, redis_bulk_reply_p);
 
     list_init(&replies, freeReplyObject);
-    redis_n_replies(vtab->c, expected.size, &replies);
+    redis_vtbl_connection_read_queued(&vtab->conn, &replies);
     
     err = redis_check_expected_list(&replies, &expected);
     list_free(&expected);
@@ -922,11 +931,10 @@ static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     int err;
     int eof;
     redis_vtbl_vtab *vtab;
-    list_t args;
     redisReply *reply;
-    char *str;
     size_t i;
     redis_vtbl_column_spec *cspec;
+    redis_vtbl_command cmd;
 
     eof = cur->current_row == vector_end(&cur->rows);
     if(eof) return;
@@ -935,27 +943,15 @@ static void redis_vtbl_cursor_get(redis_vtbl_cursor *cur) {
     list_clear(&cur->column_data);
 
     /* HMGET key_base.current_row column0 ...columnN */
-    list_init(&args, free);
-    
-    list_push(&args, strdup("HMGET"));
-    
-    str = 0;
-    string_append(&str, vtab->key_base);
-    string_append(&str, ":");
-    string_append(&str, i64tos(*cur->current_row));
-    if(!str) {
-        list_free(&args);
-        return;
-    }
-    list_push(&args, str);
+    redis_vtbl_command_init_arg(&cmd, "HMGET");
+    redis_vtbl_command_arg_fmt(&cmd, "%s:%lld", vtab->key_base, *cur->current_row);
     
     for(i = 0; i < vtab->columns.size; ++i) {
         cspec = vector_get(&vtab->columns, i);
-        list_push(&args, strdup(cspec->name));
+        redis_vtbl_command_arg(&cmd, cspec->name);
     }
     
-    reply = redisCommandArgv(vtab->c, args.size, (const char**)args.data, 0);
-    list_free(&args);
+    reply = redis_vtbl_connection_command(&vtab->conn, &cmd);
     if(!reply) return;
     
     /* note: This implementation differs from the prototype.
@@ -1052,7 +1048,7 @@ static int redis_vtbl_cursor_filter_scan(redis_vtbl_cursor *cursor) {
     
     vtab = cursor->vtab;
     
-    reply = redisCommand(vtab->c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
+    reply = redisCommand(vtab->conn.c, "ZRANGE %s.index.rowid 0 -1", vtab->key_base);
     if(!reply) return SQLITE_ERROR;
     
     err = redis_reply_numeric_array(&cursor->rows, reply);
@@ -1070,19 +1066,19 @@ static int redis_vtbl_cursor_filter_rowid(redis_vtbl_cursor *cursor, sqlite3_int
 
     switch(idxNum) {
         case CURSOR_INDEX_ROWID_EQ:
-            reply = redisCommand(vtab->c, "EXISTS %s:%lld", vtab->key_base, row_id);
+            reply = redisCommand(vtab->conn.c, "EXISTS %s:%lld", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base, row_id);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index.rowid (%lld +inf", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf (%lld", vtab->key_base, row_id);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index.rowid -inf (%lld", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid %lld +inf", vtab->key_base, row_id);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index.rowid %lld +inf", vtab->key_base, row_id);
             break;
         case CURSOR_INDEX_ROWID_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index.rowid -inf %lld", vtab->key_base, row_id);
             break;
     }
 
@@ -1157,7 +1153,7 @@ static int redis_vtbl_cursor_filter_index_text(redis_vtbl_cursor *cursor, int id
     
     vtab = cursor->vtab;
     
-    reply = redisCommand(vtab->c, "ZRANK %s.index:%s %s", vtab->key_base, idxStr, value);
+    reply = redisCommand(vtab->conn.c, "ZRANK %s.index:%s %s", vtab->key_base, idxStr, value);
     if(reply->type == REDIS_REPLY_INTEGER) {
         rank = reply->integer;
     
@@ -1172,27 +1168,27 @@ static int redis_vtbl_cursor_filter_index_text(redis_vtbl_cursor *cursor, int id
 
     if(idxNum == CURSOR_INDEX_NAMED_EQ) {
         if(rank == -1) return SQLITE_OK;    /* rank indicates item does not exist. */
-        reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%s", vtab->key_base, idxStr, value);
+        reply = redisCommand(vtab->conn.c, "SMEMBERS %s.index:%s:%s", vtab->key_base, idxStr, value);
     
     } else if(rank == -1) {
         /* todo fallback to a scan if the value does not exist in the index.
          * This can be improved by determining the approximate rank of the item
          * and then using zrange more efficiently. */
-        reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 -1", vtab->key_base, idxStr);
+        reply = redisCommand(vtab->conn.c, "ZRANGE %s.index:%s 0 -1", vtab->key_base, idxStr);
     
     } else {
         switch(idxNum) {
             case CURSOR_INDEX_NAMED_GT:
-                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
+                reply = redisCommand(vtab->conn.c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
                 break;
             case CURSOR_INDEX_NAMED_LT:
-                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
+                reply = redisCommand(vtab->conn.c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
                 break;
             case CURSOR_INDEX_NAMED_GE:
-                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
+                reply = redisCommand(vtab->conn.c, "ZRANGE %s.index:%s %lld -1", vtab->key_base, idxStr, rank);
                 break;
             case CURSOR_INDEX_NAMED_LE:
-                reply = redisCommand(vtab->c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
+                reply = redisCommand(vtab->conn.c, "ZRANGE %s.index:%s 0 %lld", vtab->key_base, idxStr, rank);
                 break;
         }
     }
@@ -1214,20 +1210,20 @@ static int redis_vtbl_cursor_filter_index_integer(redis_vtbl_cursor *cursor, int
 
     switch(idxNum) {
         case CURSOR_INDEX_NAMED_EQ:
-            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%lld", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "SMEMBERS %s.index:%s:%lld", vtab->key_base, idxStr, value);
             break;
         
         case CURSOR_INDEX_NAMED_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s (%lld +inf", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%lld", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s -inf (%lld", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %lld +inf", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s %lld +inf", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %lld", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s -inf %lld", vtab->key_base, idxStr, value);
             break;
     }
     
@@ -1248,20 +1244,20 @@ static int redis_vtbl_cursor_filter_index_float(redis_vtbl_cursor *cursor, int i
 
     switch(idxNum) {
         case CURSOR_INDEX_NAMED_EQ:
-            reply = redisCommand(vtab->c, "SMEMBERS %s.index:%s:%f", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "SMEMBERS %s.index:%s:%f", vtab->key_base, idxStr, value);
             break;
         
         case CURSOR_INDEX_NAMED_GT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s (%f +inf", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s (%f +inf", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_LT:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf (%f", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s -inf (%f", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_GE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s %f +inf", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s %f +inf", vtab->key_base, idxStr, value);
             break;
         case CURSOR_INDEX_NAMED_LE:
-            reply = redisCommand(vtab->c, "ZRANGEBYSCORE %s.index:%s -inf %f", vtab->key_base, idxStr, value);
+            reply = redisCommand(vtab->conn.c, "ZRANGEBYSCORE %s.index:%s -inf %f", vtab->key_base, idxStr, value);
             break;
     }
     
