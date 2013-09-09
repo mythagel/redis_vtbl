@@ -31,6 +31,7 @@ ${PROJECT_SOURCE_DIR}/src/connection.c
 ${PROJECT_SOURCE_DIR}/src/list.c 
 ${PROJECT_SOURCE_DIR}/src/vector.c 
 ${PROJECT_SOURCE_DIR}/src/address.c 
+${PROJECT_SOURCE_DIR}/src/redis.c 
 ${PROJECT_SOURCE_DIR}/src/sentinel.c)
 TARGET_LINK_LIBRARIES(test_connection m hiredis)
 REGISTER_TEST(test_connection)
