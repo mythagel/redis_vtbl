@@ -77,14 +77,17 @@ int redis_incr(redisContext *c, const char *key, int64_t *old) {
     return 0;
 }
 
-void redis_n_replies(redisContext *c, size_t n, list_t *replies) {
+int redis_n_replies(redisContext *c, size_t n, list_t *replies) {
+    int err;
     redisReply *reply;
     size_t i;
     
     for(i = 0; i < n; ++i) {
-        redisGetReply(c, (void**)&reply);
+        err = redisGetReply(c, (void**)&reply);
+        if(err) return err;
         list_push(replies, reply);
     }
+    return 0;
 }
 
 int redis_check_expected(list_t *replies, ...) {

@@ -26,7 +26,7 @@ int redis_incr(redisContext *c, const char *key, int64_t *old);
 
 /* read n replies from context and store in replies. 
  * list must already be inited with freeReplyObject */
-void redis_n_replies(redisContext *c, size_t n, list_t *replies);
+int redis_n_replies(redisContext *c, size_t n, list_t *replies);
 
 /* Check that the replies provided match the given predicates.
  * predicates return 1 for match and 0 for not matched */
