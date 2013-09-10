@@ -23,7 +23,7 @@ typedef struct redis_vtbl_connection {
     vector_t addresses;             /* list of redis/sentinel addresses */
     char errstr[128];               /* error string from redis */
     redisContext *c;
-    size_t queued_commands;
+    vector_t cmd_queue;
 } redis_vtbl_connection;
 
 typedef struct redis_vtbl_command {
