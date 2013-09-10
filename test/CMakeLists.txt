@@ -35,3 +35,6 @@ ${PROJECT_SOURCE_DIR}/src/redis.c
 ${PROJECT_SOURCE_DIR}/src/sentinel.c)
 TARGET_LINK_LIBRARIES(test_connection m hiredis)
 REGISTER_TEST(test_connection)
+
+ADD_EXECUTABLE(test_format EXCLUDE_FROM_ALL test_format.c)
+REGISTER_TEST(test_format)
